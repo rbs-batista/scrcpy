@@ -23,6 +23,9 @@ struct sc_controller {
     struct sc_control_msg_queue queue;
     struct sc_receiver receiver;
 
+    sc_thread loc_thread;
+    sc_raw_socket loc_socket;
+
     const struct sc_controller_callbacks *cbs;
     void *cbs_userdata;
 };

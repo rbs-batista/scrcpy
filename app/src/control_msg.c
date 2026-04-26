@@ -178,6 +178,14 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
             size_t len = write_string_tiny(&buf[1], msg->start_app.name, 255);
             return 1 + len;
         }
+        case SC_CONTROL_MSG_TYPE_INJECT_LOCATION: {
+            uint64_t lat, lng;
+            memcpy(&lat, &msg->inject_location.latitude, sizeof(lat));
+            memcpy(&lng, &msg->inject_location.longitude, sizeof(lng));
+            sc_write64be(&buf[1], lat);
+            sc_write64be(&buf[9], lng);
+            return 17;
+        }
         case SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL:
         case SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL:
         case SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS:
@@ -310,6 +318,9 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
             break;
         case SC_CONTROL_MSG_TYPE_START_APP:
             LOG_CMSG("start app \"%s\"", msg->start_app.name);
+            break;
+        case SC_CONTROL_MSG_TYPE_INJECT_LOCATION:
+            LOG_CMSG("inject location %f, %f", msg->inject_location.latitude, msg->inject_location.longitude);
             break;
         case SC_CONTROL_MSG_TYPE_RESET_VIDEO:
             LOG_CMSG("reset video");

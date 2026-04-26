@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scrcpy Mock Location Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            width: 250px;
+        }
+        button {
+            display: block;
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 10px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover { background: #45a049; }
+        button.stop { background: #f44336; }
+        button.stop:hover { background: #d32f2f; }
+        button.route { background: #2196F3; }
+        button.route:hover { background: #0b7dda; }
+        .info { font-size: 12px; color: #666; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h3>Scrcpy Mock Location</h3>
+        <div class="info">Status: <span id="status">Ready</span></div>
+        <button id="btn-mode" class="route">Enable Route Mode</button>
+        <button id="btn-start-route" style="display: none;">Start Route</button>
+        <button id="btn-stop-route" class="stop" style="display: none;">Stop Route</button>
+        <button id="btn-clear" class="stop">Clear Markers</button>
+        <div class="info">Click on the map to set location.</div>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script>
+        const map = L.map('map').setView([-23.5505, -46.6333], 13); // Default SP, Brazil
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let marker = null;
+        let routeMarkers = [];
+        let polyline = null;
+        let routeMode = false;
+        let routingInterval = null;
+
+        const btnMode = document.getElementById('btn-mode');
+        const btnStartRoute = document.getElementById('btn-start-route');
+        const btnStopRoute = document.getElementById('btn-stop-route');
+        const btnClear = document.getElementById('btn-clear');
+        const statusEl = document.getElementById('status');
+
+        function setStatus(msg) {
+            statusEl.innerText = msg;
+        }
+
+        async function sendLocation(lat, lng) {
+            try {
+                const response = await fetch('/location', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lat, lng })
+                });
+                if (response.ok) {
+                    setStatus(`Sent: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+                } else {
+                    setStatus('Error sending location');
+                }
+            } catch (err) {
+                setStatus('Failed to connect to backend');
+            }
+        }
+
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lng = e.latlng.lng;
+
+            if (routeMode) {
+                const newMarker = L.circleMarker(e.latlng, {radius: 6, color: 'blue'}).addTo(map);
+                routeMarkers.push(newMarker);
+                
+                const latlngs = routeMarkers.map(m => m.getLatLng());
+                if (polyline) map.removeLayer(polyline);
+                polyline = L.polyline(latlngs, {color: 'red'}).addTo(map);
+                
+                btnStartRoute.style.display = 'block';
+            } else {
+                if (marker) map.removeLayer(marker);
+                marker = L.marker(e.latlng).addTo(map);
+                sendLocation(lat, lng);
+            }
+        });
+
+        btnMode.addEventListener('click', () => {
+            routeMode = !routeMode;
+            btnMode.innerText = routeMode ? 'Disable Route Mode' : 'Enable Route Mode';
+            btnMode.className = routeMode ? 'stop' : 'route';
+            if (!routeMode) {
+                btnStartRoute.style.display = 'none';
+                btnStopRoute.style.display = 'none';
+                stopRouting();
+            }
+        });
+
+        btnClear.addEventListener('click', () => {
+            if (marker) map.removeLayer(marker);
+            routeMarkers.forEach(m => map.removeLayer(m));
+            if (polyline) map.removeLayer(polyline);
+            routeMarkers = [];
+            marker = null;
+            polyline = null;
+            btnStartRoute.style.display = routeMode ? 'block' : 'none';
+            stopRouting();
+        });
+
+        function stopRouting() {
+            if (routingInterval) {
+                clearInterval(routingInterval);
+                routingInterval = null;
+                btnStartRoute.style.display = 'block';
+                btnStopRoute.style.display = 'none';
+                setStatus('Route stopped');
+            }
+        }
+
+        btnStopRoute.addEventListener('click', stopRouting);
+
+        btnStartRoute.addEventListener('click', () => {
+            if (routeMarkers.length < 2) {
+                alert("Please add at least 2 points to start a route.");
+                return;
+            }
+            
+            btnStartRoute.style.display = 'none';
+            btnStopRoute.style.display = 'block';
+            
+            let currentIndex = 0;
+            let currentStep = 0;
+            const stepsPerSegment = 20; // 20 updates between two points
+            const updateIntervalMs = 500; // Update every 500ms
+            
+            routingInterval = setInterval(() => {
+                if (currentIndex >= routeMarkers.length - 1) {
+                    stopRouting();
+                    return;
+                }
+                
+                const p1 = routeMarkers[currentIndex].getLatLng();
+                const p2 = routeMarkers[currentIndex + 1].getLatLng();
+                
+                const lat = p1.lat + (p2.lat - p1.lat) * (currentStep / stepsPerSegment);
+                const lng = p1.lng + (p2.lng - p1.lng) * (currentStep / stepsPerSegment);
+                
+                if (marker) map.removeLayer(marker);
+                marker = L.marker([lat, lng]).addTo(map);
+                sendLocation(lat, lng);
+                
+                currentStep++;
+                if (currentStep >= stepsPerSegment) {
+                    currentStep = 0;
+                    currentIndex++;
+                }
+            }, updateIntervalMs);
+        });
+
+    </script>
+</body>
+</html>

@@ -25,6 +25,9 @@ import android.view.InputEvent;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 
+import android.location.Location;
+import android.location.LocationManager;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -311,5 +314,42 @@ public final class Device {
             am.forceStopPackage(packageName);
         }
         am.startActivity(launchIntent, options);
+    }
+
+    @SuppressLint("MissingPermission")
+    public static void injectLocation(double latitude, double longitude) {
+        try {
+            LocationManager lm = (LocationManager) FakeContext.get().getSystemService(android.content.Context.LOCATION_SERVICE);
+            if (lm == null) {
+                Ln.e("LocationManager not found");
+                return;
+            }
+
+            String provider = LocationManager.GPS_PROVIDER;
+
+            try {
+                lm.addTestProvider(provider, false, false, false, false, false, false, false, 1, 1);
+            } catch (SecurityException e) {
+                Ln.w("Missing android.permission.ACCESS_MOCK_LOCATION. Cannot inject location.");
+                return;
+            } catch (IllegalArgumentException e) {
+                // Provider already exists
+            }
+
+            lm.setTestProviderEnabled(provider, true);
+
+            Location location = new Location(provider);
+            location.setLatitude(latitude);
+            location.setLongitude(longitude);
+            location.setAltitude(0);
+            location.setAccuracy(1.0f);
+            location.setTime(System.currentTimeMillis());
+            location.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
+
+            lm.setTestProviderLocation(provider, location);
+            Ln.i("Injected location: " + latitude + ", " + longitude);
+        } catch (Exception e) {
+            Ln.e("Failed to inject location", e);
+        }
     }
 }

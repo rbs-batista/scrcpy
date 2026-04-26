@@ -56,6 +56,8 @@ public class ControlMessageReader {
                 return parseUhidDestroy();
             case ControlMessage.TYPE_START_APP:
                 return parseStartApp();
+            case ControlMessage.TYPE_INJECT_LOCATION:
+                return parseInjectLocation();
             default:
                 throw new ControlProtocolException("Unknown event type: " + type);
         }
@@ -163,6 +165,12 @@ public class ControlMessageReader {
     private ControlMessage parseStartApp() throws IOException {
         String name = parseString(1);
         return ControlMessage.createStartApp(name);
+    }
+
+    private ControlMessage parseInjectLocation() throws IOException {
+        double latitude = dis.readDouble();
+        double longitude = dis.readDouble();
+        return ControlMessage.createInjectLocation(latitude, longitude);
     }
 
     private Position parsePosition() throws IOException {

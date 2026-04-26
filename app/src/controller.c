@@ -1,6 +1,17 @@
 #include "controller.h"
 
 #include <assert.h>
+#include <stdio.h>
+
+#ifdef _WIN32
+# include <winsock2.h>
+# include <ws2tcpip.h>
+#else
+# include <sys/socket.h>
+# include <netinet/in.h>
+# include <arpa/inet.h>
+# include <unistd.h>
+#endif
 
 #include "util/log.h"
 
@@ -58,6 +69,7 @@ sc_controller_init(struct sc_controller *controller, sc_socket control_socket,
 
     controller->control_socket = control_socket;
     controller->stopped = false;
+    controller->loc_socket = SC_RAW_SOCKET_NONE;
 
     assert(cbs && cbs->on_ended);
     controller->cbs = cbs;
@@ -183,6 +195,47 @@ run_controller(void *data) {
     return 0;
 }
 
+static int
+run_location_server(void *data) {
+    struct sc_controller *controller = data;
+    sc_raw_socket sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock == SC_RAW_SOCKET_NONE) return 0;
+
+    controller->loc_socket = sock;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(5554);
+
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        LOGE("Failed to bind location UDP socket on port 5554");
+        return 0;
+    }
+
+    LOGI("Location UDP server listening on 127.0.0.1:5554");
+
+    char buf[256];
+    while (!controller->stopped) {
+        ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            buf[n] = '\0';
+            double lat, lng;
+            if (sscanf(buf, "%lf,%lf", &lat, &lng) == 2) {
+                struct sc_control_msg msg;
+                msg.type = SC_CONTROL_MSG_TYPE_INJECT_LOCATION;
+                msg.inject_location.latitude = lat;
+                msg.inject_location.longitude = lng;
+                sc_controller_push_msg(controller, &msg);
+            }
+        } else {
+            break;
+        }
+    }
+    return 0;
+}
+
 bool
 sc_controller_start(struct sc_controller *controller) {
     LOGD("Starting controller thread");
@@ -200,6 +253,8 @@ sc_controller_start(struct sc_controller *controller) {
         return false;
     }
 
+    sc_thread_create(&controller->loc_thread, run_location_server, "scrcpy-loc", controller);
+
     return true;
 }
 
@@ -209,10 +264,21 @@ sc_controller_stop(struct sc_controller *controller) {
     controller->stopped = true;
     sc_cond_signal(&controller->msg_cond);
     sc_mutex_unlock(&controller->mutex);
+    if (controller->loc_socket != SC_RAW_SOCKET_NONE) {
+#ifdef _WIN32
+        closesocket(controller->loc_socket);
+#else
+        shutdown(controller->loc_socket, SHUT_RDWR);
+        close(controller->loc_socket);
+#endif
+    }
 }
 
 void
 sc_controller_join(struct sc_controller *controller) {
     sc_thread_join(&controller->thread, NULL);
     sc_receiver_join(&controller->receiver);
+    if (controller->loc_socket != SC_RAW_SOCKET_NONE) {
+        sc_thread_join(&controller->loc_thread, NULL);
+    }
 }

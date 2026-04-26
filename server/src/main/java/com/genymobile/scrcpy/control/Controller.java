@@ -304,6 +304,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             case ControlMessage.TYPE_START_APP:
                 startAppAsync(msg.getText());
                 break;
+            case ControlMessage.TYPE_INJECT_LOCATION:
+                Device.injectLocation(msg.getLatitude(), msg.getLongitude());
+                break;
             case ControlMessage.TYPE_RESET_VIDEO:
                 resetVideo();
                 break;

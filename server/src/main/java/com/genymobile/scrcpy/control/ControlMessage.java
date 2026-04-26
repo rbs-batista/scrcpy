@@ -25,6 +25,7 @@ public final class ControlMessage {
     public static final int TYPE_OPEN_HARD_KEYBOARD_SETTINGS = 15;
     public static final int TYPE_START_APP = 16;
     public static final int TYPE_RESET_VIDEO = 17;
+    public static final int TYPE_INJECT_LOCATION = 18;
 
     public static final long SEQUENCE_INVALID = 0;
 
@@ -53,6 +54,8 @@ public final class ControlMessage {
     private boolean on;
     private int vendorId;
     private int productId;
+    private double latitude;
+    private double longitude;
 
     private ControlMessage() {
     }
@@ -166,6 +169,14 @@ public final class ControlMessage {
         return msg;
     }
 
+    public static ControlMessage createInjectLocation(double latitude, double longitude) {
+        ControlMessage msg = new ControlMessage();
+        msg.type = TYPE_INJECT_LOCATION;
+        msg.latitude = latitude;
+        msg.longitude = longitude;
+        return msg;
+    }
+
     public int getType() {
         return type;
     }
@@ -248,5 +259,13 @@ public final class ControlMessage {
 
     public int getProductId() {
         return productId;
+    }
+
+    public double getLatitude() {
+        return latitude;
+    }
+
+    public double getLongitude() {
+        return longitude;
     }
 }
