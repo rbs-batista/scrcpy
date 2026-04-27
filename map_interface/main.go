@@ -279,10 +279,11 @@ func (s *ScrcpyDirectStream) Start() error {
 		"CLASSPATH=/data/local/tmp/scrcpy-server.jar",
 		"app_process", "/",
 		"com.genymobile.scrcpy.Server", "3.2",
-		"log_level=warn", "tunnel_forward=true",
+		"log_level=info", "tunnel_forward=true",
 		"video=true", "audio=false", "control=false",
 		"raw_stream=true", "max_fps=30",
 	)
+	serverCmd.Stderr = os.Stderr // server logs visible in terminal
 	if err := serverCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start scrcpy-server: %v", err)
 	}
@@ -307,6 +308,7 @@ func (s *ScrcpyDirectStream) Start() error {
 			_, err = io.ReadFull(c, b[:])
 			c.SetReadDeadline(time.Time{})
 			if err == nil {
+				log.Printf("[%s] TCP first byte: 0x%02x", serial, b[0])
 				tcpConn = c
 				ffmpegInput = io.MultiReader(bytes.NewReader(b[:]), c)
 				break
@@ -324,7 +326,7 @@ func (s *ScrcpyDirectStream) Start() error {
 
 	// Pipe TCP → ffmpeg → JPEG frames
 	ffmpegCmd := exec.Command(ffmpegPath,
-		"-loglevel", "error",
+		"-loglevel", "warning",
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		"-f", "h264",
@@ -379,6 +381,8 @@ func (s *ScrcpyDirectStream) extractJPEGFrames(r io.Reader, stopChan <-chan stru
 
 	var buf []byte
 	chunk := make([]byte, 64*1024)
+	frameCount := 0
+	totalBytes := 0
 
 	jpegStart := []byte{0xFF, 0xD8, 0xFF}
 	jpegEnd := []byte{0xFF, 0xD9}
@@ -392,6 +396,10 @@ func (s *ScrcpyDirectStream) extractJPEGFrames(r io.Reader, stopChan <-chan stru
 
 		n, err := r.Read(chunk)
 		if n > 0 {
+			totalBytes += n
+			if frameCount == 0 && totalBytes > 0 {
+				log.Printf("[%s] ffmpeg producing output (%d bytes so far)", s.serial, totalBytes)
+			}
 			buf = append(buf, chunk[:n]...)
 			for {
 				start := bytes.Index(buf, jpegStart)
@@ -409,12 +417,17 @@ func (s *ScrcpyDirectStream) extractJPEGFrames(r io.Reader, stopChan <-chan stru
 				s.frame = frame
 				s.mu.Unlock()
 				buf = buf[end:]
+				frameCount++
+				if frameCount == 1 || frameCount%150 == 0 {
+					log.Printf("[%s] frame #%d extracted (%d bytes)", s.serial, frameCount, len(frame))
+				}
 			}
 			if len(buf) > 8*1024*1024 {
 				buf = buf[len(buf)-1024*1024:]
 			}
 		}
 		if err != nil {
+			log.Printf("[%s] ffmpeg output ended: %v (frames=%d, bytes=%d)", s.serial, err, frameCount, totalBytes)
 			return
 		}
 	}
@@ -641,6 +654,12 @@ func main() {
 	exePath, _ = filepath.EvalSymlinks(exePath)
 	globalServerJar = findServerJar(filepath.Dir(exePath))
 	if globalServerJar == "" {
+		// Fallback for "go run": search from working directory
+		if cwd, err := os.Getwd(); err == nil {
+			globalServerJar = findServerJar(cwd)
+		}
+	}
+	if globalServerJar == "" {
 		log.Println("WARNING: scrcpy-server.jar not found — JAR must already be on device")
 	} else {
 		log.Printf("Using server JAR: %s", globalServerJar)
@@ -704,7 +723,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	// GET /stream — MJPEG stream for the selected device
+	// GET /stream — MJPEG stream for the selected device (kept for compatibility)
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		serial := getSerial()
 		if ds := pool.get(serial); ds != nil && ds.IsRunning() {
@@ -712,6 +731,28 @@ func main() {
 			return
 		}
 		http.Error(w, "stream not available", http.StatusServiceUnavailable)
+	})
+
+	// GET /frame — latest JPEG frame for the selected device (polling-based)
+	frameNoFrameLogCount := 0
+	http.HandleFunc("/frame", func(w http.ResponseWriter, r *http.Request) {
+		serial := getSerial()
+		var frame []byte
+		if ds := pool.get(serial); ds != nil {
+			frame = ds.GetFrame()
+		}
+		if frame == nil {
+			frameNoFrameLogCount++
+			if frameNoFrameLogCount <= 5 || frameNoFrameLogCount%30 == 0 {
+				log.Printf("/frame: no frame available (serial=%q, count=%d)", serial, frameNoFrameLogCount)
+			}
+			http.Error(w, "no frame", http.StatusServiceUnavailable)
+			return
+		}
+		frameNoFrameLogCount = 0
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Write(frame)
 	})
 
 	// POST /scrcpy/start — ensure the selected device stream is running (pool handles this automatically)
@@ -871,7 +912,18 @@ func main() {
 	})
 
 	exeDir := filepath.Dir(exePath)
-	fs := http.FileServer(http.Dir(exeDir))
+	// When running via "go run", the exe is in a temp dir without index.html.
+	// Fall back to the working directory so "go run main.go" works for development.
+	serveDir := exeDir
+	if _, err := os.Stat(filepath.Join(serveDir, "index.html")); err != nil {
+		if cwd, err := os.Getwd(); err == nil {
+			if _, err := os.Stat(filepath.Join(cwd, "index.html")); err == nil {
+				serveDir = cwd
+				log.Printf("Serving files from working directory: %s", serveDir)
+			}
+		}
+	}
+	fs := http.FileServer(http.Dir(serveDir))
 	http.Handle("/", fs)
 
 	log.Printf("Map server running at http://localhost%s\n", HTTPPort)

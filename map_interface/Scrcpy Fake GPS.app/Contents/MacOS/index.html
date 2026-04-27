@@ -821,6 +821,33 @@
 
         function setStatus(msg) { statusEl.innerText = msg; }
 
+        // ========== Frame polling ==========
+        let framePollTimer = null;
+        let currentFrameUrl = null;
+
+        function startFramePoll() {
+            stopFramePoll();
+            (async function poll() {
+                if (!scrcpyRunning) return;
+                try {
+                    const res = await fetch('/frame');
+                    if (res.ok) {
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        streamImg.src = url;
+                        if (currentFrameUrl) URL.revokeObjectURL(currentFrameUrl);
+                        currentFrameUrl = url;
+                    }
+                } catch {}
+                if (scrcpyRunning) framePollTimer = setTimeout(poll, 33);
+            })();
+        }
+
+        function stopFramePoll() {
+            if (framePollTimer) { clearTimeout(framePollTimer); framePollTimer = null; }
+            if (currentFrameUrl) { URL.revokeObjectURL(currentFrameUrl); currentFrameUrl = null; }
+        }
+
         // ========== Scrcpy Control ==========
         function updateScrcpyUI(running, streaming) {
             scrcpyRunning = running;
@@ -834,10 +861,11 @@
             }
 
             if (streaming) {
-                streamImg.src = '/stream?' + Date.now();
                 streamImg.style.display = 'block';
                 placeholder.style.display = 'none';
+                startFramePoll();
             } else {
+                stopFramePoll();
                 streamImg.src = '';
                 streamImg.style.display = 'none';
                 placeholder.style.display = 'block';
