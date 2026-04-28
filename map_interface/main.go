@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	webview "github.com/webview/webview_go"
 )
 
@@ -23,7 +25,18 @@ const (
 	HTTPPort       = ":8080"
 	UDPIp          = "127.0.0.1"
 	UDPPort        = "5554"
-	baseScrcpyPort = 27183 // first device gets this port, subsequent get +1, +2, …
+	baseScrcpyPort = 27183
+
+	// scrcpy control message types
+	ctrlMsgInjectTouch = 0x02
+
+	// Android motion event actions
+	touchActionDown = 0
+	touchActionUp   = 1
+	touchActionMove = 2
+
+	// pointer IDs (int64 interpreted as uint64)
+	pointerIDFinger = uint64(0xFFFFFFFFFFFFFFFE) // SC_POINTER_ID_GENERIC_FINGER
 )
 
 type LocationData struct {
@@ -37,7 +50,8 @@ var (
 	phoneWinH       int
 	ffmpegPath      string
 	globalServerJar string
-	installedJars   sync.Map // serial → bool, avoids repeated adb shell ls
+	globalServerVer string
+	installedJars   sync.Map
 )
 
 type DeviceInfo struct {
@@ -47,7 +61,6 @@ type DeviceInfo struct {
 	IP     string `json:"ip"`
 }
 
-// Global selected device serial
 var (
 	currentSerial string
 	serialMu      sync.Mutex
@@ -60,7 +73,6 @@ func getSerial() string {
 	return currentSerial
 }
 
-// makeAdbCmd builds an adb command targeting the currently selected device.
 func makeAdbCmd(args ...string) *exec.Cmd {
 	serial := getSerial()
 	if serial != "" {
@@ -71,25 +83,43 @@ func makeAdbCmd(args ...string) *exec.Cmd {
 
 // findAdb locates the adb binary, preferring the one bundled next to the executable.
 func findAdb() (string, error) {
-	// Bundled adb — highest priority
 	if exePath, err := os.Executable(); err == nil {
 		if exePath, err = filepath.EvalSymlinks(exePath); err == nil {
-			bundled := filepath.Join(filepath.Dir(exePath), "adb")
-			if _, err := os.Stat(bundled); err == nil {
-				return bundled, nil
+			dir := filepath.Dir(exePath)
+			// On Windows only accept .exe — a bare "adb" file cannot be executed.
+			names := []string{"adb.exe", "adb"}
+			if runtime.GOOS == "windows" {
+				names = []string{"adb.exe"}
+			}
+			for _, name := range names {
+				bundled := filepath.Join(dir, name)
+				if _, err := os.Stat(bundled); err == nil {
+					return bundled, nil
+				}
 			}
 		}
 	}
 
-	// System-wide fallbacks
 	if p, err := exec.LookPath("adb"); err == nil {
 		return p, nil
 	}
 
 	homeDir, _ := os.UserHomeDir()
-	candidates := []string{}
+	var candidates []string
 	if sdkRoot := os.Getenv("ANDROID_SDK_ROOT"); sdkRoot != "" {
-		candidates = append(candidates, filepath.Join(sdkRoot, "platform-tools", "adb"))
+		candidates = append(candidates,
+			filepath.Join(sdkRoot, "platform-tools", "adb.exe"),
+			filepath.Join(sdkRoot, "platform-tools", "adb"),
+		)
+	}
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		appData := os.Getenv("APPDATA")
+		candidates = append(candidates,
+			filepath.Join(localAppData, "Android", "Sdk", "platform-tools", "adb.exe"),
+			filepath.Join(appData, "Android", "Sdk", "platform-tools", "adb.exe"),
+			filepath.Join(homeDir, "AppData", "Local", "Android", "Sdk", "platform-tools", "adb.exe"),
+		)
 	}
 	candidates = append(candidates,
 		filepath.Join(homeDir, "Library", "Android", "sdk", "platform-tools", "adb"),
@@ -100,11 +130,47 @@ func findAdb() (string, error) {
 			return c, nil
 		}
 	}
-
 	return "", fmt.Errorf("adb not found — place the adb binary next to the app executable")
 }
 
-// getDeviceIP tries to get the Wi-Fi IP for a given device serial.
+// findFfmpeg locates ffmpeg. Optional — only needed for MJPEG /stream fallback.
+func findFfmpeg() string {
+	if exePath, err := os.Executable(); err == nil {
+		if exePath, err = filepath.EvalSymlinks(exePath); err == nil {
+			dir := filepath.Dir(exePath)
+			names := []string{"ffmpeg.exe", "ffmpeg"}
+			if runtime.GOOS == "windows" {
+				names = []string{"ffmpeg.exe"}
+			}
+			for _, name := range names {
+				bundled := filepath.Join(dir, name)
+				if _, err := os.Stat(bundled); err == nil {
+					return bundled
+				}
+			}
+		}
+	}
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{
+			`C:\ffmpeg\bin\ffmpeg.exe`,
+			`C:\Program Files\ffmpeg\bin\ffmpeg.exe`,
+		} {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	for _, p := range []string{"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 func getDeviceIP(serial string) string {
 	cmd := exec.Command(globalAdbPath, "-s", serial, "shell", "ip", "route", "show", "dev", "wlan0")
 	out, err := cmd.Output()
@@ -115,8 +181,6 @@ func getDeviceIP(serial string) string {
 			}
 		}
 	}
-
-	// Fallback: parse "inet <ip>/<mask>" from ip addr
 	cmd2 := exec.Command(globalAdbPath, "-s", serial, "shell", "ip", "addr", "show", "wlan0")
 	out2, err := cmd2.Output()
 	if err == nil {
@@ -133,33 +197,34 @@ func getDeviceIP(serial string) string {
 			}
 		}
 	}
-
 	return ""
 }
 
-// ensureServerJar pushes scrcpy-server.jar to the device if not already present.
 func ensureServerJar(serial string) {
-	if globalServerJar == "" || serial == "" {
+	if serial == "" || globalServerJar == "" {
 		return
 	}
-	if _, ok := installedJars.Load(serial); ok {
-		return
-	}
-	check := exec.Command(globalAdbPath, "-s", serial, "shell", "ls", "/data/local/tmp/scrcpy-server.jar")
-	if check.Run() == nil {
-		installedJars.Store(serial, true)
-		return
-	}
-	push := exec.Command(globalAdbPath, "-s", serial, "push", globalServerJar, "/data/local/tmp/scrcpy-server.jar")
+
+	// Mata qualquer scrcpy antigo + remove jar
+	exec.Command(globalAdbPath, "-s", serial, "shell",
+		"sh", "-c",
+		"pkill -9 -f scrcpy; rm -f /data/local/tmp/scrcpy-server",
+	).Run()
+
+	// Push do jar correto
+	push := exec.Command(globalAdbPath, "-s", serial, "push",
+		globalServerJar,
+		"/data/local/tmp/scrcpy-server",
+	)
+
 	if out, err := push.CombinedOutput(); err != nil {
 		log.Printf("Failed to push server jar to %s: %v — %s", serial, err, out)
-	} else {
-		log.Printf("Installed scrcpy-server.jar on %s", serial)
-		installedJars.Store(serial, true)
+		return
 	}
+
+	log.Printf("scrcpy-server atualizado em %s", serial)
 }
 
-// listDevices runs "adb devices -l" and returns structured device info.
 func listDevices() []DeviceInfo {
 	cmd := exec.Command(globalAdbPath, "devices", "-l")
 	out, err := cmd.Output()
@@ -167,22 +232,18 @@ func listDevices() []DeviceInfo {
 		log.Printf("adb devices error: %v", err)
 		return nil
 	}
-
 	var devices []DeviceInfo
 	for line := range strings.SplitSeq(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "List of") {
 			continue
 		}
-
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
-
 		serial := fields[0]
 		state := fields[1]
-
 		model := ""
 		for _, f := range fields[2:] {
 			if m, ok := strings.CutPrefix(f, "model:"); ok {
@@ -190,15 +251,8 @@ func listDevices() []DeviceInfo {
 				break
 			}
 		}
-
-		devices = append(devices, DeviceInfo{
-			Serial: serial,
-			State:  state,
-			Model:  model,
-		})
+		devices = append(devices, DeviceInfo{Serial: serial, State: state, Model: model})
 	}
-
-	// Fetch IPs and pre-install server jar in parallel for connected devices
 	var wg sync.WaitGroup
 	for i := range devices {
 		if devices[i].State != "device" {
@@ -208,184 +262,277 @@ func listDevices() []DeviceInfo {
 		go func(i int) {
 			defer wg.Done()
 			devices[i].IP = getDeviceIP(devices[i].Serial)
-			ensureServerJar(devices[i].Serial)
+			// ensureServerJar(devices[i].Serial)
 		}(i)
 	}
 	wg.Wait()
-
 	return devices
 }
 
-// ScrcpyDirectStream connects to scrcpy-server.jar on the device and decodes
-// the H.264 stream via ffmpeg, serving frames as MJPEG on /stream.
+// ─── H.264 NAL Unit Parser ─────────────────────────────────────────────────
+
+// findStartCode returns the position and header length (3 or 4) of the next
+// Annex B start code in data starting at offset. Returns (-1, 0) if not found.
+func findStartCode(data []byte, offset int) (pos, headerLen int) {
+	for i := offset; i < len(data)-2; i++ {
+		if data[i] == 0 && data[i+1] == 0 {
+			if i+3 < len(data) && data[i+2] == 0 && data[i+3] == 1 {
+				return i, 4
+			}
+			if data[i+2] == 1 {
+				return i, 3
+			}
+		}
+	}
+	return -1, 0
+}
+
+// extractNextNAL returns the first complete NAL unit (including its start code),
+// its NAL type, and the number of bytes consumed from data.
+// Returns (nil, 0, 0) when the next NAL unit is not yet complete.
+func extractNextNAL(data []byte) (nal []byte, nalType byte, consumed int) {
+	first, firstLen := findStartCode(data, 0)
+	if first < 0 {
+		return nil, 0, 0
+	}
+	next, _ := findStartCode(data, first+firstLen+1)
+	if next < 0 {
+		return nil, 0, 0
+	}
+	nal = data[first:next]
+	if len(nal) > firstLen {
+		nalType = nal[firstLen] & 0x1F
+	}
+	return nal, nalType, next
+}
+
+// ─── WebSocket client ──────────────────────────────────────────────────────
+
+type wsClient struct {
+	ch chan []byte
+}
+
+var wsUpgrader = websocket.Upgrader{
+	CheckOrigin:     func(r *http.Request) bool { return true },
+	ReadBufferSize:  4096,
+	WriteBufferSize: 256 * 1024,
+}
+
+// ─── ScrcpyDirectStream ────────────────────────────────────────────────────
+
 type ScrcpyDirectStream struct {
 	serverJar string
-	tcpPort   int          // TCP port on localhost forwarded to this device's abstract socket
-	opMu      sync.Mutex   // serializes Start/Stop so only one runs at a time
-	mu        sync.RWMutex // protects frame/running fields
-	frame     []byte
-	running   bool
-	stopChan  chan struct{}
-	tcpConn   net.Conn
-	serverCmd *exec.Cmd
-	ffmpegCmd *exec.Cmd
-	wg        sync.WaitGroup
-	serial    string
+	tcpPort   int
+	opMu      sync.Mutex
+	mu        sync.RWMutex
+	ctrlMu    sync.Mutex // serializes writes to controlConn
+
+	// state
+	running     bool
+	stopChan    chan struct{}
+	tcpConn     net.Conn // video socket
+	controlConn net.Conn // control channel socket
+	serverCmd   *exec.Cmd
+	ffmpegCmd   *exec.Cmd
+	wg          sync.WaitGroup
+	serial      string
+
+	// MJPEG fallback (only when ffmpeg available)
+	frame []byte
+
+	// WebSocket H.264 broadcast
+	wsClients sync.Map // *wsClient → struct{}
+
+	// device resolution (fetched after connect)
+	deviceW int
+	deviceH int
 }
 
 func (s *ScrcpyDirectStream) Start() error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 
-	s.mu.RLock()
-	running := s.running
-	s.mu.RUnlock()
-	if running {
-		return fmt.Errorf("direct stream already running")
-	}
-
-	if s.serverJar == "" {
-		return fmt.Errorf("scrcpy-server.jar not found")
-	}
-	if ffmpegPath == "" {
-		return fmt.Errorf("ffmpeg not found")
+	if s.running {
+		return fmt.Errorf("stream already running")
 	}
 
 	serial := s.serial
 	ensureServerJar(serial)
 
-	// Kill any stale scrcpy-server still holding the abstract socket.
-	// Use multiple kill methods for compatibility across Android versions:
-	// - pkill by cmdline pattern (works when pkill supports -f)
-	// - ps -ef column 2 (POSIX ps: UID PID PPID ...)
-	// - ps -A column 2 (toybox ps on newer Android)
+	// kill anterior
 	exec.Command(globalAdbPath, "-s", serial, "shell",
 		"sh", "-c",
-		"pkill -9 -f scrcpy 2>/dev/null; "+
-			"ps -ef 2>/dev/null | awk '/scrcpy/&&!/grep/{print $2}' | xargs kill -9 2>/dev/null; "+
-			"ps -A  2>/dev/null | awk '/scrcpy/&&!/grep/{print $2}' | xargs kill -9 2>/dev/null; true",
+		"pkill -9 -f scrcpy || true",
 	).Run()
-	time.Sleep(800 * time.Millisecond)
 
-	// Forward TCP port to the device abstract socket
+	time.Sleep(500 * time.Millisecond)
+
+	// forward
 	if out, err := exec.Command(globalAdbPath, "-s", serial, "forward",
 		fmt.Sprintf("tcp:%d", s.tcpPort), "localabstract:scrcpy",
 	).CombinedOutput(); err != nil {
 		return fmt.Errorf("adb forward failed: %v — %s", err, out)
 	}
 
-	// Start scrcpy-server on device (background, do not Wait)
+	// start server
 	serverCmd := exec.Command(globalAdbPath, "-s", serial, "shell",
-		"CLASSPATH=/data/local/tmp/scrcpy-server.jar",
+		"CLASSPATH=/data/local/tmp/scrcpy-server",
 		"app_process", "/",
-		"com.genymobile.scrcpy.Server", "3.2",
-		"log_level=info", "tunnel_forward=true",
-		"video=true", "audio=false", "control=false",
-		"raw_stream=true", "max_fps=30",
+		"com.genymobile.scrcpy.Server", globalServerVer,
+		"log_level=info",
+		"tunnel_forward=true",
+		"video=true",
+		"audio=false",
+		"control=true",
+		"max_fps=30",
+		// 👇 REMOVA raw_stream
+		// "raw_stream=true",
 	)
-	serverCmd.Stderr = os.Stderr // server logs visible in terminal
+	serverCmd.Stderr = os.Stderr
+	serverCmd.Stdout = os.Stdout
+
 	if err := serverCmd.Start(); err != nil {
-		return fmt.Errorf("failed to start scrcpy-server: %v", err)
+		return err
 	}
 
-	// Connect TCP and wait for first H.264 byte, retrying both as a unit.
-	// A successful dial may still yield immediate EOF if the adb abstract-socket
-	// forward races ahead of the server's listener — reconnecting resolves it.
-	var tcpConn net.Conn
-	var ffmpegInput io.Reader
-	{
-		connDeadline := time.Now().Add(10 * time.Second)
-		var lastErr error
-		for time.Now().Before(connDeadline) {
-			c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.tcpPort), 300*time.Millisecond)
-			if err != nil {
-				time.Sleep(100 * time.Millisecond)
-				lastErr = err
-				continue
-			}
-			c.SetReadDeadline(time.Now().Add(2 * time.Second))
-			var b [1]byte
-			_, err = io.ReadFull(c, b[:])
-			c.SetReadDeadline(time.Time{})
-			if err == nil {
-				log.Printf("[%s] TCP first byte: 0x%02x", serial, b[0])
-				tcpConn = c
-				ffmpegInput = io.MultiReader(bytes.NewReader(b[:]), c)
-				break
-			}
-			c.Close()
-			lastErr = err
-			time.Sleep(150 * time.Millisecond)
+	time.Sleep(800 * time.Millisecond)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", s.tcpPort)
+
+	// conectar sockets
+	var videoConn, ctrlConn net.Conn
+	deadline := time.Now().Add(15 * time.Second)
+
+	for time.Now().Before(deadline) {
+		vc, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
-		if tcpConn == nil {
-			serverCmd.Process.Kill()
-			exec.Command(globalAdbPath, "-s", serial, "forward", "--remove", fmt.Sprintf("tcp:%d", s.tcpPort)).Run()
-			return fmt.Errorf("no H.264 data within 10s: %v", lastErr)
+
+		cc, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err != nil {
+			vc.Close()
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
+
+		videoConn = vc
+		ctrlConn = cc
+		break
 	}
 
-	// Pipe TCP → ffmpeg → JPEG frames
-	ffmpegCmd := exec.Command(ffmpegPath,
-		"-loglevel", "warning",
-		"-fflags", "nobuffer",
-		"-flags", "low_delay",
-		"-f", "h264",
-		"-i", "pipe:0",
-		"-f", "image2pipe",
-		"-vcodec", "mjpeg",
-		"-pix_fmt", "yuvj420p",
-		"-q:v", "3",
-		"pipe:1",
-	)
-	ffmpegCmd.Stdin = ffmpegInput
-	ffmpegCmd.Stderr = os.Stderr
-	ffmpegOut, err := ffmpegCmd.StdoutPipe()
-	if err != nil {
-		tcpConn.Close()
-		serverCmd.Process.Kill()
-		return fmt.Errorf("ffmpeg pipe: %v", err)
-	}
-	if err := ffmpegCmd.Start(); err != nil {
-		tcpConn.Close()
-		serverCmd.Process.Kill()
-		return fmt.Errorf("ffmpeg start: %v", err)
+	if videoConn == nil {
+		return fmt.Errorf("failed to connect sockets")
 	}
 
+	// 🔥 =========================
+	// 🔥 HANDSHAKE CORRETO AQUI
+	// 🔥 =========================
+
+	videoConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	// 1. dummy byte
+	dummy := make([]byte, 1)
+	if _, err := io.ReadFull(videoConn, dummy); err != nil {
+		return fmt.Errorf("handshake dummy failed: %v", err)
+	}
+
+	// 2. device name (64 bytes)
+	nameBuf := make([]byte, 64)
+	if _, err := io.ReadFull(videoConn, nameBuf); err != nil {
+		return fmt.Errorf("handshake device name failed: %v", err)
+	}
+
+	deviceName := strings.TrimRight(string(nameBuf), "\x00")
+	log.Printf("[%s] device name: %s", serial, deviceName)
+
+	// 3. resolution (4 bytes)
+	sizeBuf := make([]byte, 4)
+	if _, err := io.ReadFull(videoConn, sizeBuf); err != nil {
+		return fmt.Errorf("handshake size failed: %v", err)
+	}
+
+	w := binary.BigEndian.Uint16(sizeBuf[0:2])
+	h := binary.BigEndian.Uint16(sizeBuf[2:4])
+
+	log.Printf("[%s] device resolution: %dx%d", serial, w, h)
+
+	videoConn.SetReadDeadline(time.Time{})
+
+	// salvar estado
 	stopChan := make(chan struct{})
+
 	s.mu.Lock()
-	s.stopChan = stopChan
-	s.tcpConn = tcpConn
-	s.serverCmd = serverCmd
-	s.ffmpegCmd = ffmpegCmd
-	s.frame = nil
 	s.running = true
+	s.stopChan = stopChan
+	s.tcpConn = videoConn
+	s.controlConn = ctrlConn
+	s.serverCmd = serverCmd
+	s.deviceW = int(w)
+	s.deviceH = int(h)
 	s.mu.Unlock()
 
-	log.Printf("[%s] ScrcpyDirectStream started on port %d", serial, s.tcpPort)
+	log.Printf("[%s] stream started OK", serial)
 
+	// parser H264
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.extractJPEGFrames(ffmpegOut, stopChan)
+		s.extractH264Frames(videoConn, stopChan)
 	}()
+
 	return nil
 }
 
-func (s *ScrcpyDirectStream) extractJPEGFrames(r io.Reader, stopChan <-chan struct{}) {
+// fetchDeviceSize queries the device resolution via ADB and caches it.
+func (s *ScrcpyDirectStream) fetchDeviceSize() {
+	cmd := exec.Command(globalAdbPath, "-s", s.serial, "shell", "wm", "size")
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "size:") {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		dims := strings.TrimSpace(parts[1])
+		wh := strings.Split(dims, "x")
+		if len(wh) != 2 {
+			continue
+		}
+		w, errW := strconv.Atoi(strings.TrimSpace(wh[0]))
+		h, errH := strconv.Atoi(strings.TrimSpace(wh[1]))
+		if errW == nil && errH == nil && w > 0 && h > 0 {
+			s.mu.Lock()
+			s.deviceW, s.deviceH = w, h
+			s.mu.Unlock()
+			log.Printf("[%s] device size: %dx%d", s.serial, w, h)
+			return
+		}
+	}
+}
+
+// extractH264Frames reads raw H.264 Annex B, groups NAL units into access units,
+// and broadcasts each frame to WebSocket clients.
+func (s *ScrcpyDirectStream) extractH264Frames(r io.Reader, stopChan <-chan struct{}) {
 	defer func() {
 		s.mu.Lock()
 		s.running = false
 		s.mu.Unlock()
-		log.Printf("[%s] ScrcpyDirectStream stopped", s.serial)
+		log.Printf("[%s] H.264 stream ended", s.serial)
 	}()
 
 	var buf []byte
-	chunk := make([]byte, 64*1024)
+	readBuf := make([]byte, 64*1024)
+	var sps, pps []byte // latest config NALs
+	var frameBuf []byte
+	frameIsKey := false
 	frameCount := 0
-	totalBytes := 0
-
-	jpegStart := []byte{0xFF, 0xD8, 0xFF}
-	jpegEnd := []byte{0xFF, 0xD9}
 
 	for {
 		select {
@@ -394,43 +541,99 @@ func (s *ScrcpyDirectStream) extractJPEGFrames(r io.Reader, stopChan <-chan stru
 		default:
 		}
 
-		n, err := r.Read(chunk)
+		n, err := r.Read(readBuf)
 		if n > 0 {
-			totalBytes += n
-			if frameCount == 0 && totalBytes > 0 {
-				log.Printf("[%s] ffmpeg producing output (%d bytes so far)", s.serial, totalBytes)
+			buf = append(buf, readBuf[:n]...)
+		}
+
+		// Drain all complete NAL units from the buffer.
+		for {
+			nal, nalType, consumed := extractNextNAL(buf)
+			if nal == nil {
+				break
 			}
-			buf = append(buf, chunk[:n]...)
-			for {
-				start := bytes.Index(buf, jpegStart)
-				if start < 0 {
-					break
+			buf = buf[consumed:]
+
+			switch nalType {
+			case 7: // SPS — flush any pending frame, then cache
+				if len(frameBuf) > 0 {
+					s.dispatchFrame(frameBuf, frameIsKey)
+					frameBuf = nil
+					frameCount++
+					if frameCount == 1 {
+						log.Printf("[%s] first frame dispatched", s.serial)
+					}
 				}
-				end := bytes.Index(buf[start+3:], jpegEnd)
-				if end < 0 {
-					break
+				sps = append([]byte(nil), nal...)
+
+			case 8: // PPS — cache (belongs to next IDR)
+				pps = append([]byte(nil), nal...)
+
+			case 5: // IDR slice — start a new keyframe
+				if len(frameBuf) > 0 {
+					s.dispatchFrame(frameBuf, frameIsKey)
+					frameBuf = nil
+					frameCount++
 				}
-				end = start + 3 + end + 2
-				frame := make([]byte, end-start)
-				copy(frame, buf[start:end])
-				s.mu.Lock()
-				s.frame = frame
-				s.mu.Unlock()
-				buf = buf[end:]
-				frameCount++
-				if frameCount == 1 || frameCount%150 == 0 {
-					log.Printf("[%s] frame #%d extracted (%d bytes)", s.serial, frameCount, len(frame))
+				frameIsKey = true
+				if len(sps) > 0 {
+					frameBuf = append(frameBuf, sps...)
 				}
-			}
-			if len(buf) > 8*1024*1024 {
-				buf = buf[len(buf)-1024*1024:]
+				if len(pps) > 0 {
+					frameBuf = append(frameBuf, pps...)
+				}
+				frameBuf = append(frameBuf, nal...)
+
+			case 1: // Non-IDR slice — flush previous frame, start new P-frame
+				if len(frameBuf) > 0 {
+					s.dispatchFrame(frameBuf, frameIsKey)
+					frameBuf = nil
+					frameCount++
+				}
+				frameIsKey = false
+				frameBuf = append(frameBuf, nal...)
+
+			case 9: // AUD — ignore
+			default: // SEI, etc. — append to current frame
+				frameBuf = append(frameBuf, nal...)
 			}
 		}
+
 		if err != nil {
-			log.Printf("[%s] ffmpeg output ended: %v (frames=%d, bytes=%d)", s.serial, err, frameCount, totalBytes)
+			if len(frameBuf) > 0 {
+				s.dispatchFrame(frameBuf, frameIsKey)
+			}
+			log.Printf("[%s] stream read error: %v (frames=%d)", s.serial, err, frameCount)
 			return
 		}
+
+		if len(buf) > 4*1024*1024 {
+			buf = buf[len(buf)-256*1024:]
+		}
 	}
+}
+
+// dispatchFrame broadcasts a complete H.264 access unit to all WebSocket subscribers.
+// msg format: [1 byte flags (0x01=keyframe, 0x00=delta)] + [H.264 Annex B data]
+func (s *ScrcpyDirectStream) dispatchFrame(frameData []byte, isKey bool) {
+	if len(frameData) == 0 {
+		return
+	}
+	msg := make([]byte, 1+len(frameData))
+	if isKey {
+		msg[0] = 0x01
+	}
+	copy(msg[1:], frameData)
+
+	s.wsClients.Range(func(k, _ interface{}) bool {
+		client := k.(*wsClient)
+		select {
+		case client.ch <- msg:
+		default:
+			// Drop frame for slow client — matches scrcpy's single-frame buffer strategy.
+		}
+		return true
+	})
 }
 
 func (s *ScrcpyDirectStream) Stop() {
@@ -444,12 +647,12 @@ func (s *ScrcpyDirectStream) Stop() {
 	}
 	stopChan := s.stopChan
 	tcpConn := s.tcpConn
+	ctrlConn := s.controlConn
 	serverCmd := s.serverCmd
 	ffmpegCmd := s.ffmpegCmd
 	serial := s.serial
 	s.mu.Unlock()
 
-	// Kill device-side server before closing the connection.
 	exec.Command(globalAdbPath, "-s", serial, "shell",
 		"sh", "-c",
 		"pkill -9 -f scrcpy.Server 2>/dev/null; "+
@@ -459,6 +662,9 @@ func (s *ScrcpyDirectStream) Stop() {
 	close(stopChan)
 	if tcpConn != nil {
 		tcpConn.Close()
+	}
+	if ctrlConn != nil {
+		ctrlConn.Close()
 	}
 	if ffmpegCmd != nil && ffmpegCmd.Process != nil {
 		ffmpegCmd.Process.Kill()
@@ -470,9 +676,11 @@ func (s *ScrcpyDirectStream) Stop() {
 
 	s.mu.Lock()
 	s.frame = nil
+	s.controlConn = nil
 	s.mu.Unlock()
 
-	exec.Command(globalAdbPath, "-s", serial, "forward", "--remove", fmt.Sprintf("tcp:%d", s.tcpPort)).Run()
+	exec.Command(globalAdbPath, "-s", serial, "forward", "--remove",
+		fmt.Sprintf("tcp:%d", s.tcpPort)).Run()
 }
 
 func (s *ScrcpyDirectStream) IsRunning() bool {
@@ -481,12 +689,58 @@ func (s *ScrcpyDirectStream) IsRunning() bool {
 	return s.running
 }
 
+func (s *ScrcpyDirectStream) HasControl() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.controlConn != nil && s.deviceW > 0 && s.deviceH > 0
+}
+
 func (s *ScrcpyDirectStream) GetFrame() []byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.frame
 }
 
+// SendTouch sends a binary touch event over the scrcpy control channel.
+// action: touchActionDown / touchActionUp / touchActionMove
+func (s *ScrcpyDirectStream) SendTouch(action, x, y int) error {
+	s.mu.RLock()
+	ctrl := s.controlConn
+	dw := s.deviceW
+	dh := s.deviceH
+	s.mu.RUnlock()
+
+	if ctrl == nil {
+		return fmt.Errorf("no control connection")
+	}
+	if dw == 0 || dh == 0 {
+		return fmt.Errorf("device size unknown")
+	}
+
+	var pressure uint16
+	if action == touchActionDown || action == touchActionMove {
+		pressure = 0xFFFF
+	}
+
+	// 32-byte message per control_msg.c:sc_control_msg_serialize (INJECT_TOUCH_EVENT)
+	var buf [32]byte
+	buf[0] = ctrlMsgInjectTouch
+	buf[1] = byte(action)
+	binary.BigEndian.PutUint64(buf[2:], pointerIDFinger)
+	binary.BigEndian.PutUint32(buf[10:], uint32(int32(x)))
+	binary.BigEndian.PutUint32(buf[14:], uint32(int32(y)))
+	binary.BigEndian.PutUint16(buf[18:], uint16(dw))
+	binary.BigEndian.PutUint16(buf[20:], uint16(dh))
+	binary.BigEndian.PutUint16(buf[22:], pressure)
+	// buf[24:32] = action_button(4) + buttons(4) — already zero
+
+	s.ctrlMu.Lock()
+	_, err := ctrl.Write(buf[:])
+	s.ctrlMu.Unlock()
+	return err
+}
+
+// ServeHTTP serves MJPEG when a frame is available (fallback for browsers without WebCodecs).
 func (s *ScrcpyDirectStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -497,7 +751,6 @@ func (s *ScrcpyDirectStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return
 	}
-
 	for {
 		select {
 		case <-r.Context().Done():
@@ -517,8 +770,8 @@ func (s *ScrcpyDirectStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// StreamPool manages one ScrcpyDirectStream per connected device,
-// pre-connecting in background so switching devices is instant.
+// ─── StreamPool ────────────────────────────────────────────────────────────
+
 type StreamPool struct {
 	mu       sync.Mutex
 	streams  map[string]*ScrcpyDirectStream
@@ -526,10 +779,7 @@ type StreamPool struct {
 }
 
 func newStreamPool() *StreamPool {
-	return &StreamPool{
-		streams:  make(map[string]*ScrcpyDirectStream),
-		nextPort: baseScrcpyPort,
-	}
+	return &StreamPool{streams: make(map[string]*ScrcpyDirectStream), nextPort: baseScrcpyPort}
 }
 
 func (p *StreamPool) get(serial string) *ScrcpyDirectStream {
@@ -551,7 +801,6 @@ func (p *StreamPool) ensure(serial string) *ScrcpyDirectStream {
 	return ds
 }
 
-// sync detects connected/disconnected devices and manages their streams.
 func (p *StreamPool) sync() {
 	devices := listDevices()
 	active := make(map[string]bool)
@@ -569,7 +818,6 @@ func (p *StreamPool) sync() {
 			}(ds)
 		}
 	}
-
 	p.mu.Lock()
 	var gone []string
 	for serial := range p.streams {
@@ -585,7 +833,6 @@ func (p *StreamPool) sync() {
 	p.mu.Unlock()
 }
 
-// watch syncs immediately on startup then every 3 seconds.
 func (p *StreamPool) watch() {
 	for {
 		p.sync()
@@ -593,24 +840,24 @@ func (p *StreamPool) watch() {
 	}
 }
 
-func findFfmpeg() string {
-	if p, err := exec.LookPath("ffmpeg"); err == nil {
-		return p
-	}
-	for _, p := range []string{"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
-}
+// ─── misc helpers ──────────────────────────────────────────────────────────
 
 func findServerJar(exeDir string) string {
 	dir := exeDir
 	for range 8 {
-		candidate := filepath.Join(dir, "x", "server", "scrcpy-server")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+		// Official scrcpy release: scrcpy-server alongside the exe
+		for _, name := range []string{"scrcpy-server", "scrcpy-server"} {
+			if p := filepath.Join(dir, name); fileExists(p) {
+				return p
+			}
+			// one level deep
+			if p := filepath.Join(dir, "server", name); fileExists(p) {
+				return p
+			}
+			// original project layout
+			if p := filepath.Join(dir, "x", "server", name); fileExists(p) {
+				return p
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -621,9 +868,41 @@ func findServerJar(exeDir string) string {
 	return ""
 }
 
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// detectServerVersion inspects the directory containing the server JAR for a
+// file like "scrcpy-win64-v3.3.1.txt" and returns the embedded version string.
+// Falls back to "3.2" if nothing is found.
+func detectServerVersion(serverPath string) string {
+	entries, err := os.ReadDir(filepath.Dir(serverPath))
+	if err != nil {
+		return "3.2"
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "scrcpy-") || !strings.HasSuffix(name, ".txt") {
+			continue
+		}
+		// e.g. "scrcpy-win64-v3.3.1.txt" → split on "-v" → last part → "3.3.1"
+		parts := strings.SplitN(name, "-v", 2)
+		if len(parts) == 2 {
+			ver := strings.TrimSuffix(parts[1], ".txt")
+			if ver != "" {
+				return ver
+			}
+		}
+	}
+	return "3.2"
+}
+
 func phoneWindowSize() (int, int) {
 	return 420, 920
 }
+
+// ─── main ──────────────────────────────────────────────────────────────────
 
 func main() {
 	adbPath, err := findAdb()
@@ -637,7 +916,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to resolve UDP address: %v", err)
 	}
-
 	conn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
 		log.Fatalf("Failed to connect to UDP socket: %v", err)
@@ -645,30 +923,36 @@ func main() {
 	defer conn.Close()
 
 	ffmpegPath = findFfmpeg()
-	if ffmpegPath == "" {
-		log.Println("WARNING: ffmpeg not found — streaming unavailable")
+	if ffmpegPath != "" {
+		log.Printf("Using ffmpeg (MJPEG fallback): %s", ffmpegPath)
 	} else {
-		log.Printf("Using ffmpeg: %s", ffmpegPath)
+		log.Println("ffmpeg not found — MJPEG /stream fallback unavailable (WebSocket H.264 will be used)")
 	}
+
 	exePath, _ := os.Executable()
 	exePath, _ = filepath.EvalSymlinks(exePath)
-	globalServerJar = findServerJar(filepath.Dir(exePath))
+	globalServerJar = filepath.Join("scrcpy", "scrcpy-server")
 	if globalServerJar == "" {
-		// Fallback for "go run": search from working directory
 		if cwd, err := os.Getwd(); err == nil {
 			globalServerJar = findServerJar(cwd)
 		}
 	}
+	// Also search alongside adb — users often keep all scrcpy tools together.
+	if globalServerJar == "" && globalAdbPath != "" {
+		globalServerJar = findServerJar(filepath.Dir(globalAdbPath))
+	}
 	if globalServerJar == "" {
-		log.Println("WARNING: scrcpy-server.jar not found — JAR must already be on device")
+		log.Println("WARNING: scrcpy-server not found — JAR must already be on device")
+		globalServerVer = "3.2"
 	} else {
-		log.Printf("Using server JAR: %s", globalServerJar)
+		globalServerVer = detectServerVersion(globalServerJar)
+		log.Printf("Using server JAR: %s (version %s)", globalServerJar, globalServerVer)
 	}
 
 	pool := newStreamPool()
-	go pool.watch() // syncs immediately; devices connect before the webview opens
+	go pool.watch()
 
-	// GET /devices — list connected ADB devices with serial, model and IP
+	// ── GET /devices
 	http.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -682,7 +966,7 @@ func main() {
 		json.NewEncoder(w).Encode(devices)
 	})
 
-	// POST /devices/select — set the active device serial
+	// ── POST /devices/select
 	http.HandleFunc("/devices/select", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -703,37 +987,74 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "serial": body.Serial})
 	})
 
-	// POST /location — send coordinates via UDP
+	// ── POST /location
 	http.HandleFunc("/location", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
 		var data LocationData
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-
 		message := fmt.Sprintf("%f,%f", data.Lat, data.Lng)
 		conn.Write([]byte(message))
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	// GET /stream — MJPEG stream for the selected device (kept for compatibility)
+	// ── GET /ws/video — WebSocket H.264 stream (primary, low-latency)
+	http.HandleFunc("/ws/video", func(w http.ResponseWriter, r *http.Request) {
+		wsConn, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("ws upgrade: %v", err)
+			return
+		}
+		defer wsConn.Close()
+
+		serial := getSerial()
+		ds := pool.get(serial)
+		if ds == nil || !ds.IsRunning() {
+			return
+		}
+
+		client := &wsClient{ch: make(chan []byte, 2)}
+		ds.wsClients.Store(client, struct{}{})
+		defer ds.wsClients.Delete(client)
+
+		// Drain reads (browser may send pings).
+		go func() {
+			for {
+				if _, _, err := wsConn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+
+		for {
+			select {
+			case msg := <-client.ch:
+				if err := wsConn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+					return
+				}
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+
+	// ── GET /stream — MJPEG fallback (requires ffmpeg)
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		serial := getSerial()
-		if ds := pool.get(serial); ds != nil && ds.IsRunning() {
+		if ds := pool.get(serial); ds != nil && ds.IsRunning() && ds.GetFrame() != nil {
 			ds.ServeHTTP(w, r)
 			return
 		}
-		http.Error(w, "stream not available", http.StatusServiceUnavailable)
+		http.Error(w, "stream not available (use /ws/video for WebSocket H.264)", http.StatusServiceUnavailable)
 	})
 
-	// GET /frame — latest JPEG frame for the selected device (polling-based)
+	// ── GET /frame — latest JPEG (MJPEG fallback polling)
 	frameNoFrameLogCount := 0
 	http.HandleFunc("/frame", func(w http.ResponseWriter, r *http.Request) {
 		serial := getSerial()
@@ -744,7 +1065,7 @@ func main() {
 		if frame == nil {
 			frameNoFrameLogCount++
 			if frameNoFrameLogCount <= 5 || frameNoFrameLogCount%30 == 0 {
-				log.Printf("/frame: no frame available (serial=%q, count=%d)", serial, frameNoFrameLogCount)
+				log.Printf("/frame: no frame (serial=%q, count=%d)", serial, frameNoFrameLogCount)
 			}
 			http.Error(w, "no frame", http.StatusServiceUnavailable)
 			return
@@ -755,7 +1076,7 @@ func main() {
 		w.Write(frame)
 	})
 
-	// POST /scrcpy/start — ensure the selected device stream is running (pool handles this automatically)
+	// ── POST /scrcpy/start
 	http.HandleFunc("/scrcpy/start", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -772,7 +1093,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	// POST /scrcpy/stop — stop the selected device stream
+	// ── POST /scrcpy/stop
 	http.HandleFunc("/scrcpy/stop", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -786,7 +1107,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
 	})
 
-	// GET /scrcpy/status — streaming status for the selected device
+	// ── GET /scrcpy/status
 	http.HandleFunc("/scrcpy/status", func(w http.ResponseWriter, r *http.Request) {
 		serial := getSerial()
 		streaming := false
@@ -800,7 +1121,7 @@ func main() {
 		})
 	})
 
-	// GET /device/size
+	// ── GET /device/size
 	http.HandleFunc("/device/size", func(w http.ResponseWriter, r *http.Request) {
 		cmd := makeAdbCmd("shell", "wm", "size")
 		output, err := cmd.Output()
@@ -808,7 +1129,6 @@ func main() {
 			http.Error(w, "Failed to get device size", http.StatusInternalServerError)
 			return
 		}
-
 		lines := strings.Split(string(output), "\n")
 		width, height := 1080, 2280
 		for _, line := range lines {
@@ -829,18 +1149,16 @@ func main() {
 				}
 			}
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]int{"width": width, "height": height})
 	})
 
-	// POST /touch
+	// ── POST /touch
 	http.HandleFunc("/touch", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
 		var data struct {
 			Action   string `json:"action"`
 			X        int    `json:"x"`
@@ -849,46 +1167,75 @@ func main() {
 			Y2       int    `json:"y2"`
 			Duration int    `json:"duration"`
 		}
-
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
 
-		var cmd *exec.Cmd
+		serial := getSerial()
+		ds := pool.get(serial)
+
 		switch data.Action {
 		case "tap":
-			cmd = makeAdbCmd("shell", "input", "tap",
-				strconv.Itoa(data.X), strconv.Itoa(data.Y))
+			if ds != nil && ds.HasControl() {
+				go func() {
+					ds.SendTouch(touchActionDown, data.X, data.Y)
+					time.Sleep(50 * time.Millisecond)
+					ds.SendTouch(touchActionUp, data.X, data.Y)
+				}()
+			} else {
+				go makeAdbCmd("shell", "input", "tap",
+					strconv.Itoa(data.X), strconv.Itoa(data.Y)).Run()
+			}
+
 		case "swipe":
 			dur := data.Duration
 			if dur == 0 {
 				dur = 300
 			}
-			cmd = makeAdbCmd("shell", "input", "swipe",
-				strconv.Itoa(data.X), strconv.Itoa(data.Y),
-				strconv.Itoa(data.X2), strconv.Itoa(data.Y2),
-				strconv.Itoa(dur))
+			if ds != nil && ds.HasControl() {
+				go func() {
+					steps := 10
+					if dur > 500 {
+						steps = 20
+					}
+					stepDur := time.Duration(dur/steps) * time.Millisecond
+					ds.SendTouch(touchActionDown, data.X, data.Y)
+					for i := 1; i <= steps; i++ {
+						x := data.X + (data.X2-data.X)*i/steps
+						y := data.Y + (data.Y2-data.Y)*i/steps
+						ds.SendTouch(touchActionMove, x, y)
+						time.Sleep(stepDur)
+					}
+					ds.SendTouch(touchActionUp, data.X2, data.Y2)
+				}()
+			} else {
+				go makeAdbCmd("shell", "input", "swipe",
+					strconv.Itoa(data.X), strconv.Itoa(data.Y),
+					strconv.Itoa(data.X2), strconv.Itoa(data.Y2),
+					strconv.Itoa(dur)).Run()
+			}
+
 		case "keyevent":
-			cmd = makeAdbCmd("shell", "input", "keyevent", strconv.Itoa(data.X))
+			// Key events go via ADB (binary keycode injection is more complex).
+			go makeAdbCmd("shell", "input", "keyevent", strconv.Itoa(data.X)).Run()
+
 		default:
 			http.Error(w, "Unknown action", http.StatusBadRequest)
 			return
 		}
 
-		go cmd.Run()
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	// GET /window/phone-size — return the initial phone-sized window dimensions
+	// ── GET /window/phone-size
 	http.HandleFunc("/window/phone-size", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]int{"width": phoneWinW, "height": phoneWinH})
 	})
 
-	// POST /window/resize — resize the native window from the frontend
+	// ── POST /window/resize
 	http.HandleFunc("/window/resize", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -912,8 +1259,6 @@ func main() {
 	})
 
 	exeDir := filepath.Dir(exePath)
-	// When running via "go run", the exe is in a temp dir without index.html.
-	// Fall back to the working directory so "go run main.go" works for development.
 	serveDir := exeDir
 	if _, err := os.Stat(filepath.Join(serveDir, "index.html")); err != nil {
 		if cwd, err := os.Getwd(); err == nil {
@@ -923,10 +1268,9 @@ func main() {
 			}
 		}
 	}
-	fs := http.FileServer(http.Dir(serveDir))
-	http.Handle("/", fs)
+	http.Handle("/", http.FileServer(http.Dir(serveDir)))
 
-	log.Printf("Map server running at http://localhost%s\n", HTTPPort)
+	log.Printf("Map server running at http://localhost%s", HTTPPort)
 	go func() {
 		if err := http.ListenAndServe(HTTPPort, nil); err != nil {
 			log.Fatalf("HTTP server error: %v", err)
@@ -938,7 +1282,7 @@ func main() {
 	phoneWinW, phoneWinH = phoneWindowSize()
 	mainWebview = webview.New(false)
 	defer mainWebview.Destroy()
-	mainWebview.SetTitle("Scrcpy Fake GPS")
+	mainWebview.SetTitle("DM Tools")
 	mainWebview.SetSize(phoneWinW, phoneWinH, webview.HintNone)
 	mainWebview.Navigate("http://localhost" + HTTPPort)
 	mainWebview.Run()

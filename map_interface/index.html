@@ -1,13 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Scrcpy Fake GPS</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
         body {
             font-family: 'Inter', sans-serif;
             background: #0a0a14;
@@ -127,13 +133,15 @@
             min-height: 0;
         }
 
-        .device-screen img {
+        .device-screen img,
+        .device-screen canvas {
             max-width: 100%;
             max-height: 100%;
             object-fit: contain;
             cursor: pointer;
             user-select: none;
             -webkit-user-drag: none;
+            display: none;
         }
 
         .device-placeholder {
@@ -142,25 +150,45 @@
             padding: 40px;
         }
 
-        .device-placeholder .icon { font-size: 64px; margin-bottom: 16px; }
-        .device-placeholder h3 { font-size: 18px; color: #666; margin-bottom: 8px; }
-        .device-placeholder p { font-size: 13px; line-height: 1.6; color: #555; }
+        .device-placeholder .icon {
+            font-size: 64px;
+            margin-bottom: 16px;
+        }
+
+        .device-placeholder h3 {
+            font-size: 18px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+
+        .device-placeholder p {
+            font-size: 13px;
+            line-height: 1.6;
+            color: #555;
+        }
 
         .touch-indicator {
             position: absolute;
             width: 30px;
             height: 30px;
-            border: 2px solid rgba(255,255,255,0.8);
+            border: 2px solid rgba(255, 255, 255, 0.8);
             border-radius: 50%;
-            background: rgba(255,255,255,0.2);
+            background: rgba(255, 255, 255, 0.2);
             pointer-events: none;
             transform: translate(-50%, -50%);
             animation: touchFade 0.4s ease-out forwards;
         }
 
         @keyframes touchFade {
-            0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
-            100% { transform: translate(-50%, -50%) scale(1.5); opacity: 0; }
+            0% {
+                transform: translate(-50%, -50%) scale(0.5);
+                opacity: 1;
+            }
+
+            100% {
+                transform: translate(-50%, -50%) scale(1.5);
+                opacity: 0;
+            }
         }
 
         .nav-bar {
@@ -190,19 +218,46 @@
             white-space: nowrap;
         }
 
-        button:hover { transform: translateY(-1px); }
-        button:active { transform: translateY(0); }
-        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-
-        .btn-primary { background: linear-gradient(135deg, #4caf50, #2e7d32); color: white; }
-        .btn-danger { background: linear-gradient(135deg, #f44336, #c62828); color: white; }
-        .btn-blue { background: linear-gradient(135deg, #2196F3, #1565C0); color: white; }
-        .btn-ghost {
-            background: rgba(255,255,255,0.08);
-            color: #ccc;
-            border: 1px solid rgba(255,255,255,0.12);
+        button:hover {
+            transform: translateY(-1px);
         }
-        .btn-ghost:hover { background: rgba(255,255,255,0.15); color: #fff; }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #4caf50, #2e7d32);
+            color: white;
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #f44336, #c62828);
+            color: white;
+        }
+
+        .btn-blue {
+            background: linear-gradient(135deg, #2196F3, #1565C0);
+            color: white;
+        }
+
+        .btn-ghost {
+            background: rgba(255, 255, 255, 0.08);
+            color: #ccc;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .btn-ghost:hover {
+            background: rgba(255, 255, 255, 0.15);
+            color: #fff;
+        }
+
         .btn-ghost.active {
             background: rgba(33, 150, 243, 0.2);
             color: #42a5f5;
@@ -212,15 +267,26 @@
         .btn-nav {
             padding: 8px 24px;
             font-size: 16px;
-            background: rgba(255,255,255,0.06);
+            background: rgba(255, 255, 255, 0.06);
             color: #888;
-            border: 1px solid rgba(255,255,255,0.08);
+            border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 8px;
         }
-        .btn-nav:hover { background: rgba(255,255,255,0.12); color: #fff; }
 
-        .btn-sm { padding: 5px 10px; font-size: 11px; }
-        .btn-group { display: flex; gap: 6px; }
+        .btn-nav:hover {
+            background: rgba(255, 255, 255, 0.12);
+            color: #fff;
+        }
+
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 11px;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 6px;
+        }
 
         /* Status indicators */
         .status-pill {
@@ -233,8 +299,15 @@
             font-weight: 500;
         }
 
-        .status-pill.off { background: rgba(244, 67, 54, 0.15); color: #ef5350; }
-        .status-pill.on { background: rgba(76, 175, 80, 0.15); color: #66bb6a; }
+        .status-pill.off {
+            background: rgba(244, 67, 54, 0.15);
+            color: #ef5350;
+        }
+
+        .status-pill.on {
+            background: rgba(76, 175, 80, 0.15);
+            color: #66bb6a;
+        }
 
         .status-dot {
             width: 6px;
@@ -243,20 +316,43 @@
             flex-shrink: 0;
         }
 
-        .status-pill.off .status-dot { background: #f44336; }
+        .status-pill.off .status-dot {
+            background: #f44336;
+        }
+
         .status-pill.on .status-dot {
             background: #4caf50;
             animation: pulse 1.5s infinite;
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.4; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.4;
+            }
         }
 
-        .map-info { font-size: 11px; color: #888; margin-bottom: 6px; }
-        .map-info span { color: #66bb6a; font-weight: 500; }
-        .loc-info { font-size: 10px; color: #666; margin-top: 6px; }
+        .map-info {
+            font-size: 11px;
+            color: #888;
+            margin-bottom: 6px;
+        }
+
+        .map-info span {
+            color: #66bb6a;
+            font-weight: 500;
+        }
+
+        .loc-info {
+            font-size: 10px;
+            color: #666;
+            margin-top: 6px;
+        }
 
         /* ===== Map Search ===== */
         .map-search {
@@ -287,21 +383,27 @@
             transition: border-color 0.2s;
         }
 
-        .map-search input:focus { border-color: #42a5f5; }
-        .map-search input::placeholder { color: #444; }
+        .map-search input:focus {
+            border-color: #42a5f5;
+        }
+
+        .map-search input::placeholder {
+            color: #444;
+        }
 
         .map-search-results {
             display: none;
             position: absolute;
             top: calc(100% + 4px);
-            left: 0; right: 0;
+            left: 0;
+            right: 0;
             background: #1a1a2e;
             border: 1px solid #2a2a4a;
             border-radius: 6px;
             z-index: 1000;
             max-height: 200px;
             overflow-y: auto;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
         }
 
         .map-search-result {
@@ -313,8 +415,14 @@
             line-height: 1.4;
         }
 
-        .map-search-result:last-child { border-bottom: none; }
-        .map-search-result:hover { background: rgba(33,150,243,0.12); color: #fff; }
+        .map-search-result:last-child {
+            border-bottom: none;
+        }
+
+        .map-search-result:hover {
+            background: rgba(33, 150, 243, 0.12);
+            color: #fff;
+        }
 
         .map-search-result strong {
             display: block;
@@ -336,7 +444,9 @@
             pointer-events: none;
         }
 
-        .devices-overlay > * { pointer-events: auto; }
+        .devices-overlay>* {
+            pointer-events: auto;
+        }
 
         #devices-list {
             display: flex;
@@ -349,9 +459,13 @@
             pointer-events: none;
         }
 
-        .phone-card-wrapper { pointer-events: auto; }
+        .phone-card-wrapper {
+            pointer-events: auto;
+        }
 
-        #devices-list::-webkit-scrollbar { width: 0; }
+        #devices-list::-webkit-scrollbar {
+            width: 0;
+        }
 
         .phone-card-wrapper {
             display: flex;
@@ -412,30 +526,52 @@
             line-height: 1;
         }
 
-        .phone-card:hover { border-color: #42a5f5; transform: scale(1.06); }
+        .phone-card:hover {
+            border-color: #42a5f5;
+            transform: scale(1.06);
+        }
 
         .phone-card.selected {
             border-color: #42a5f5;
-            background: rgba(33,150,243,0.12);
-            box-shadow: 0 0 10px rgba(66,165,245,0.35);
+            background: rgba(33, 150, 243, 0.12);
+            box-shadow: 0 0 10px rgba(66, 165, 245, 0.35);
         }
 
-        .phone-card.selected::before { background: #42a5f5; }
-        .phone-card.selected::after  { border-color: #42a5f5; }
+        .phone-card.selected::before {
+            background: #42a5f5;
+        }
+
+        .phone-card.selected::after {
+            border-color: #42a5f5;
+        }
 
         .phone-card.running {
             border-color: #66bb6a;
-            box-shadow: 0 0 10px rgba(102,187,106,0.4);
+            box-shadow: 0 0 10px rgba(102, 187, 106, 0.4);
             animation: runningPulse 2s infinite;
         }
 
         @keyframes runningPulse {
-            0%, 100% { box-shadow: 0 0 8px rgba(102,187,106,0.4); }
-            50%       { box-shadow: 0 0 18px rgba(102,187,106,0.7); }
+
+            0%,
+            100% {
+                box-shadow: 0 0 8px rgba(102, 187, 106, 0.4);
+            }
+
+            50% {
+                box-shadow: 0 0 18px rgba(102, 187, 106, 0.7);
+            }
         }
 
-        .phone-card.unavailable { opacity: 0.4; cursor: default; }
-        .phone-card.unavailable:hover { transform: none; border-color: #2a2a4a; }
+        .phone-card.unavailable {
+            opacity: 0.4;
+            cursor: default;
+        }
+
+        .phone-card.unavailable:hover {
+            transform: none;
+            border-color: #2a2a4a;
+        }
 
         .phone-card-label {
             font-size: 8px;
@@ -448,8 +584,10 @@
             white-space: nowrap;
         }
 
-        .phone-card.selected ~ .phone-card-label,
-        .phone-card.running  ~ .phone-card-label { color: #ccc; }
+        .phone-card.selected~.phone-card-label,
+        .phone-card.running~.phone-card-label {
+            color: #ccc;
+        }
 
         /* Tooltip — aparece à esquerda pois os cards ficam na borda direita */
         .phone-tooltip {
@@ -466,20 +604,30 @@
             white-space: nowrap;
             z-index: 200;
             pointer-events: none;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
             line-height: 1.7;
         }
 
-        .phone-card:hover .phone-tooltip { display: block; }
+        .phone-card:hover .phone-tooltip {
+            display: block;
+        }
 
-        .phone-tooltip-row { color: #888; }
-        .phone-tooltip-row span { color: #e0e0e0; }
-        .phone-tooltip-row.ip span { color: #66bb6a; }
+        .phone-tooltip-row {
+            color: #888;
+        }
+
+        .phone-tooltip-row span {
+            color: #e0e0e0;
+        }
+
+        .phone-tooltip-row.ip span {
+            color: #66bb6a;
+        }
 
         .devices-refresh-btn {
             font-size: 13px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             color: #555;
             cursor: pointer;
             padding: 4px 6px;
@@ -487,10 +635,15 @@
             transition: color 0.2s, background 0.2s;
             flex-shrink: 0;
         }
-        .devices-refresh-btn:hover { color: #aaa; background: rgba(255,255,255,0.12); transform: none; }
 
+        .devices-refresh-btn:hover {
+            color: #aaa;
+            background: rgba(255, 255, 255, 0.12);
+            transform: none;
+        }
     </style>
 </head>
+
 <body>
     <div class="app-layout">
 
@@ -514,8 +667,10 @@
                     <button id="btn-mode" class="btn-blue btn-sm">📍 Route Mode</button>
                     <button id="btn-clear" class="btn-danger btn-sm">🗑 Clear</button>
                 </div>
-                <button id="btn-start-route" class="btn-primary btn-sm" style="display:none; width:100%; margin-top:6px;">▶ Start Route</button>
-                <button id="btn-stop-route" class="btn-danger btn-sm" style="display:none; width:100%; margin-top:6px;">⏹ Stop Route</button>
+                <button id="btn-start-route" class="btn-primary btn-sm"
+                    style="display:none; width:100%; margin-top:6px;">▶ Start Route</button>
+                <button id="btn-stop-route" class="btn-danger btn-sm"
+                    style="display:none; width:100%; margin-top:6px;">⏹ Stop Route</button>
                 <div class="loc-info">Click map to set fake location</div>
             </div>
             <div id="map"></div>
@@ -528,7 +683,7 @@
         <div class="device-main">
             <div class="top-bar">
                 <div style="display:flex;align-items:center;gap:8px;">
-                    <h1>📱 Scrcpy Remote</h1>
+                    <h1>📱</h1>
                     <span id="active-device-label" style="font-size:12px;color:#42a5f5;"></span>
                 </div>
                 <div class="top-bar-actions">
@@ -544,8 +699,9 @@
                 <div class="device-placeholder" id="placeholder">
                     <div class="icon">📱</div>
                     <h3>No device connected</h3>
-                    <p>Selecione um device à direita para conectar.</p>
+                    <p>Selecione um device para conectar</p>
                 </div>
+                <canvas id="stream-canvas" style="display:none;"></canvas>
                 <img id="stream-img" src="" alt="Device Screen" style="display:none;">
 
                 <!-- Devices overlay (right side of the black area) -->
@@ -637,11 +793,11 @@
         btnMapMaximize.addEventListener('click', toggleMaximize);
 
         // ========== Devices Column ==========
-        const devicesList       = document.getElementById('devices-list');
+        const devicesList = document.getElementById('devices-list');
         const btnDevicesRefresh = document.getElementById('btn-devices-refresh');
         const activeDeviceLabel = document.getElementById('active-device-label');
         let selectedSerial = '';
-        let cachedDevices  = [];
+        let cachedDevices = [];
 
         function abbreviateModel(model) {
             if (!model) return '?';
@@ -678,8 +834,8 @@
             }
             devices.forEach(d => {
                 const isSelected = d.serial === selectedSerial;
-                const isRunning  = isSelected && scrcpyRunning;
-                const available  = d.state === 'device';
+                const isRunning = isSelected && scrcpyRunning;
+                const available = d.state === 'device';
                 const stateColor = d.state === 'device' ? '#66bb6a' : d.state === 'unauthorized' ? '#ffa726' : '#ef5350';
 
                 const wrapper = document.createElement('div');
@@ -693,7 +849,6 @@
                 card.className = cardClass;
 
                 card.innerHTML = `
-                    <div class="phone-bg-icon">📱</div>
                     <div class="phone-tooltip">
                         <div class="phone-tooltip-row">Modelo: <span>${d.model || '—'}</span></div>
                         <div class="phone-tooltip-row">Serial: <span style="font-family:monospace">${d.serial}</span></div>
@@ -727,7 +882,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ serial: '' })
-                }).catch(() => {});
+                }).catch(() => { });
                 updateScrcpyUI(false, false);
                 renderDevices(cachedDevices);
                 return;
@@ -738,11 +893,11 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ serial: d.serial })
-            }).catch(() => {});
+            }).catch(() => { });
             if (myId !== selectionId) return;
 
             selectedSerial = d.serial;
-            activeDeviceLabel.textContent = '· ' + (d.model || d.serial);
+            activeDeviceLabel.textContent = (d.model || d.serial);
 
             // If already pre-connected, stream appears instantly
             await checkScrcpyStatus();
@@ -750,7 +905,7 @@
 
             // Fallback: device still connecting — nudge the backend and poll up to 8s
             if (!scrcpyRunning) {
-                fetch('/scrcpy/start', { method: 'POST' }).catch(() => {});
+                fetch('/scrcpy/start', { method: 'POST' }).catch(() => { });
                 const deadline = Date.now() + 8000;
                 while (Date.now() < deadline) {
                     await new Promise(r => setTimeout(r, 200));
@@ -815,13 +970,95 @@
         const btnStartRoute = document.getElementById('btn-start-route');
         const btnStopRoute = document.getElementById('btn-stop-route');
         const btnClear = document.getElementById('btn-clear');
-        const statusEl   = document.getElementById('status');
-        const streamImg  = document.getElementById('stream-img');
+        const statusEl = document.getElementById('status');
+        const streamImg = document.getElementById('stream-img');
+        const streamCanvas = document.getElementById('stream-canvas');
         const placeholder = document.getElementById('placeholder');
+        const ctx = streamCanvas.getContext('2d');
 
         function setStatus(msg) { statusEl.innerText = msg; }
 
-        // ========== Frame polling ==========
+        // ========== WebSocket + WebCodecs (primary, low-latency) ==========
+        let videoWs = null;
+        let videoDecoder = null;
+        const hasWebCodecs = typeof VideoDecoder !== 'undefined';
+
+        function parseSPSCodec(data) {
+            for (let i = 0; i < data.length - 5; i++) {
+                if (data[i] === 0 && data[i + 1] === 0) {
+                    let hLen = 0;
+                    if (i + 3 < data.length && data[i + 2] === 0 && data[i + 3] === 1) hLen = 4;
+                    else if (data[i + 2] === 1) hLen = 3;
+                    if (hLen > 0 && (data[i + hLen] & 0x1F) === 7 && i + hLen + 3 < data.length) {
+                        const p = data[i + hLen + 1], c = data[i + hLen + 2], l = data[i + hLen + 3];
+                        return `avc1.${p.toString(16).padStart(2, '0')}${c.toString(16).padStart(2, '0')}${l.toString(16).padStart(2, '0')}`;
+                    }
+                }
+            }
+            return 'avc1.640028';
+        }
+
+        function stopVideoWS() {
+            if (videoDecoder) {
+                try { videoDecoder.close(); } catch (e) { }
+                videoDecoder = null;
+            }
+            if (videoWs) {
+                videoWs.onclose = null;
+                videoWs.close();
+                videoWs = null;
+            }
+        }
+
+        function startVideoWS() {
+            stopVideoWS();
+            if (!hasWebCodecs) { startFramePoll(); return; }
+
+            videoDecoder = new VideoDecoder({
+                output: (frame) => {
+                    if (streamCanvas.width !== frame.displayWidth || streamCanvas.height !== frame.displayHeight) {
+                        streamCanvas.width = frame.displayWidth;
+                        streamCanvas.height = frame.displayHeight;
+                    }
+                    ctx.drawImage(frame, 0, 0);
+                    frame.close();
+                },
+                error: (e) => { console.error('VideoDecoder:', e); videoDecoder = null; }
+            });
+
+            videoWs = new WebSocket(`ws://${location.host}/ws/video`);
+            videoWs.binaryType = 'arraybuffer';
+
+            videoWs.onmessage = (e) => {
+                if (!videoDecoder || videoDecoder.state === 'closed') return;
+                const data = new Uint8Array(e.data);
+                if (data.length < 2) return;
+                const isKey = data[0] === 0x01;
+                const nalData = data.buffer.slice(1);
+
+                if (isKey && videoDecoder.state === 'unconfigured') {
+                    videoDecoder.configure({
+                        codec: parseSPSCodec(data.slice(1)),
+                        optimizeForLatency: true,
+                        hardwareAcceleration: 'prefer-hardware'
+                    });
+                }
+                if (videoDecoder.state !== 'configured') return;
+
+                videoDecoder.decode(new EncodedVideoChunk({
+                    type: isKey ? 'key' : 'delta',
+                    timestamp: performance.now() * 1000,
+                    data: nalData
+                }));
+            };
+
+            videoWs.onerror = () => { if (!scrcpyRunning) return; startFramePoll(); };
+            videoWs.onclose = () => {
+                if (scrcpyRunning) setTimeout(startVideoWS, 1000);
+            };
+        }
+
+        // ========== MJPEG frame polling (fallback when WebCodecs unavailable) ==========
         let framePollTimer = null;
         let currentFrameUrl = null;
 
@@ -838,7 +1075,7 @@
                         if (currentFrameUrl) URL.revokeObjectURL(currentFrameUrl);
                         currentFrameUrl = url;
                     }
-                } catch {}
+                } catch { }
                 if (scrcpyRunning) framePollTimer = setTimeout(poll, 33);
             })();
         }
@@ -861,11 +1098,20 @@
             }
 
             if (streaming) {
-                streamImg.style.display = 'block';
                 placeholder.style.display = 'none';
-                startFramePoll();
+                if (hasWebCodecs) {
+                    streamCanvas.style.display = 'block';
+                    streamImg.style.display = 'none';
+                    if (!videoWs || videoWs.readyState > WebSocket.OPEN) startVideoWS();
+                } else {
+                    streamImg.style.display = 'block';
+                    streamCanvas.style.display = 'none';
+                    startFramePoll();
+                }
             } else {
+                stopVideoWS();
                 stopFramePoll();
+                streamCanvas.style.display = 'none';
                 streamImg.src = '';
                 streamImg.style.display = 'none';
                 placeholder.style.display = 'block';
@@ -877,7 +1123,7 @@
                 const res = await fetch('/scrcpy/status');
                 const data = await res.json();
                 updateScrcpyUI(data.running, data.streaming);
-            } catch (e) {}
+            } catch (e) { }
         }
 
         setInterval(checkScrcpyStatus, 3000);
@@ -894,7 +1140,7 @@
                     body: JSON.stringify({ lat, lng })
                 });
                 if (res.ok) setStatus(`${lat.toFixed(5)}, ${lng.toFixed(5)}`);
-            } catch (e) {}
+            } catch (e) { }
         }
 
         setInterval(() => {
@@ -903,13 +1149,13 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ lat: currentLat, lng: currentLng })
-                }).catch(() => {});
+                }).catch(() => { });
             }
         }, 1000);
 
         // ========== Map Interactions ==========
         function setupMapInteractions() {
-            leafletMap.on('click', function(e) {
+            leafletMap.on('click', function (e) {
                 const lat = e.latlng.lat;
                 const lng = e.latlng.lng;
 
@@ -922,7 +1168,7 @@
 
                     const latlngs = routeMarkers.map(m => m.getLatLng());
                     if (polyline) leafletMap.removeLayer(polyline);
-                    polyline = L.polyline(latlngs, {color: '#f44336', weight: 3}).addTo(leafletMap);
+                    polyline = L.polyline(latlngs, { color: '#f44336', weight: 3 }).addTo(leafletMap);
                     btnStartRoute.style.display = 'block';
                 } else {
                     if (marker) leafletMap.removeLayer(marker);
@@ -933,7 +1179,7 @@
         }
 
         // ========== Map Search ==========
-        const mapSearchInput   = document.getElementById('map-search-input');
+        const mapSearchInput = document.getElementById('map-search-input');
         const mapSearchResults = document.getElementById('map-search-results');
         let searchTimeout = null;
 
@@ -963,10 +1209,10 @@
             }
             mapSearchResults.style.display = 'block';
             results.forEach(r => {
-                const name    = r.address?.city || r.address?.town || r.address?.village || r.address?.county || r.name;
+                const name = r.address?.city || r.address?.town || r.address?.village || r.address?.county || r.name;
                 const country = r.address?.country || '';
-                const state   = r.address?.state || '';
-                const sub     = [state, country].filter(Boolean).join(', ');
+                const state = r.address?.state || '';
+                const sub = [state, country].filter(Boolean).join(', ');
 
                 const div = document.createElement('div');
                 div.className = 'map-search-result';
@@ -1070,37 +1316,37 @@
                 const data = await res.json();
                 deviceWidth = data.width;
                 deviceHeight = data.height;
-            } catch (e) {}
+            } catch (e) { }
         }
         fetchDeviceSize();
 
         function getDeviceCoords(e) {
-            const img = streamImg;
-            const rect = img.getBoundingClientRect();
-            const imgAspect = img.naturalWidth / img.naturalHeight;
+            let el, contentW, contentH;
+            if (streamCanvas.style.display !== 'none' && streamCanvas.width > 0) {
+                el = streamCanvas; contentW = streamCanvas.width; contentH = streamCanvas.height;
+            } else if (streamImg.style.display !== 'none' && streamImg.naturalWidth > 0) {
+                el = streamImg; contentW = streamImg.naturalWidth; contentH = streamImg.naturalHeight;
+            } else {
+                return null;
+            }
+
+            const rect = el.getBoundingClientRect();
+            const aspect = contentW / contentH;
             const containerAspect = rect.width / rect.height;
 
             let renderW, renderH, offsetX, offsetY;
-            if (imgAspect > containerAspect) {
-                renderW = rect.width;
-                renderH = rect.width / imgAspect;
-                offsetX = 0;
-                offsetY = (rect.height - renderH) / 2;
+            if (aspect > containerAspect) {
+                renderW = rect.width; renderH = rect.width / aspect;
+                offsetX = 0; offsetY = (rect.height - renderH) / 2;
             } else {
-                renderH = rect.height;
-                renderW = rect.height * imgAspect;
-                offsetX = (rect.width - renderW) / 2;
-                offsetY = 0;
+                renderH = rect.height; renderW = rect.height * aspect;
+                offsetX = (rect.width - renderW) / 2; offsetY = 0;
             }
 
             const relX = (e.clientX - rect.left - offsetX) / renderW;
             const relY = (e.clientY - rect.top - offsetY) / renderH;
             if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return null;
-
-            return {
-                x: Math.round(relX * deviceWidth),
-                y: Math.round(relY * deviceHeight)
-            };
+            return { x: Math.round(relX * deviceWidth), y: Math.round(relY * deviceHeight) };
         }
 
         function showTouchIndicator(e) {
@@ -1118,43 +1364,44 @@
             fetch('/touch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action, x, y, x2: x2||0, y2: y2||0, duration: duration||300 })
-            }).catch(() => {});
+                body: JSON.stringify({ action, x, y, x2: x2 || 0, y2: y2 || 0, duration: duration || 300 })
+            }).catch(() => { });
         }
 
-        streamImg.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            const c = getDeviceCoords(e);
-            if (!c) return;
-            dragStart = { x: c.x, y: c.y, time: Date.now(), event: e };
-            isDragging = false;
-        });
+        function attachTouchListeners(el) {
+            el.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                const c = getDeviceCoords(e);
+                if (!c) return;
+                dragStart = { x: c.x, y: c.y, time: Date.now() };
+                isDragging = false;
+            });
+            el.addEventListener('mousemove', (e) => {
+                if (!dragStart) return;
+                const c = getDeviceCoords(e);
+                if (!c) return;
+                if (Math.abs(c.x - dragStart.x) > 20 || Math.abs(c.y - dragStart.y) > 20) isDragging = true;
+            });
+            el.addEventListener('mouseup', (e) => {
+                if (!dragStart) return;
+                const c = getDeviceCoords(e);
+                if (!c) return;
+                if (isDragging) {
+                    const dur = Math.min(Date.now() - dragStart.time, 2000);
+                    sendTouch('swipe', dragStart.x, dragStart.y, c.x, c.y, Math.max(dur, 100));
+                } else {
+                    showTouchIndicator(e);
+                    sendTouch('tap', c.x, c.y);
+                }
+                dragStart = null;
+                isDragging = false;
+            });
+            el.addEventListener('mouseleave', () => { dragStart = null; isDragging = false; });
+            el.addEventListener('contextmenu', (e) => e.preventDefault());
+        }
 
-        streamImg.addEventListener('mousemove', (e) => {
-            if (!dragStart) return;
-            const c = getDeviceCoords(e);
-            if (!c) return;
-            if (Math.abs(c.x - dragStart.x) > 20 || Math.abs(c.y - dragStart.y) > 20) isDragging = true;
-        });
-
-        streamImg.addEventListener('mouseup', (e) => {
-            if (!dragStart) return;
-            const c = getDeviceCoords(e);
-            if (!c) return;
-
-            if (isDragging) {
-                const dur = Math.min(Date.now() - dragStart.time, 2000);
-                sendTouch('swipe', dragStart.x, dragStart.y, c.x, c.y, Math.max(dur, 100));
-            } else {
-                showTouchIndicator(e);
-                sendTouch('tap', c.x, c.y);
-            }
-            dragStart = null;
-            isDragging = false;
-        });
-
-        streamImg.addEventListener('mouseleave', () => { dragStart = null; isDragging = false; });
-        streamImg.addEventListener('contextmenu', (e) => e.preventDefault());
+        attachTouchListeners(streamImg);
+        attachTouchListeners(streamCanvas);
 
         // ========== Navigation Buttons ==========
         document.getElementById('btn-back').addEventListener('click', () => sendTouch('keyevent', 4, 0));
@@ -1162,4 +1409,5 @@
         document.getElementById('btn-recent').addEventListener('click', () => sendTouch('keyevent', 187, 0));
     </script>
 </body>
+
 </html>
