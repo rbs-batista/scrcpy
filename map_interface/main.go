@@ -23,8 +23,6 @@ import (
 
 const (
 	HTTPPort       = ":8080"
-	UDPIp          = "127.0.0.1"
-	UDPPort        = "5554"
 	baseScrcpyPort = 27183
 
 	// scrcpy control message types
@@ -42,6 +40,52 @@ const (
 type LocationData struct {
 	Lat float64 `json:"lat"`
 	Lng float64 `json:"lng"`
+}
+
+type AppConfig struct {
+	Window struct {
+		PhoneWidth    int `json:"phone_width"`
+		PhoneHeight   int `json:"phone_height"`
+		MapPanelWidth int `json:"map_panel_width"`
+		MapOpenWidth  int `json:"map_open_width"`
+		MapOpenHeight int `json:"map_open_height"`
+	} `json:"window"`
+	Stream struct {
+		MaxFPS int `json:"max_fps"`
+	} `json:"stream"`
+	GPS struct {
+		UDPIP   string `json:"udp_ip"`
+		UDPPort string `json:"udp_port"`
+	} `json:"gps"`
+}
+
+var globalConfig = AppConfig{}
+
+func init() {
+	globalConfig.Window.PhoneWidth = 420
+	globalConfig.Window.PhoneHeight = 920
+	globalConfig.Window.MapPanelWidth = 420
+	globalConfig.Stream.MaxFPS = 30
+	globalConfig.GPS.UDPIP = "127.0.0.1"
+	globalConfig.GPS.UDPPort = "5554"
+}
+
+func loadConfig(exeDir string) {
+	for _, p := range []string{
+		filepath.Join(exeDir, "config.json"),
+		filepath.Join(".", "config.json"),
+	} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if err := json.Unmarshal(data, &globalConfig); err != nil {
+			log.Printf("config.json error: %v", err)
+		} else {
+			log.Printf("config loaded: %s", p)
+		}
+		break
+	}
 }
 
 var (
@@ -390,7 +434,7 @@ func (s *ScrcpyDirectStream) Start() error {
 		"video=true",
 		"audio=false",
 		"control=true",
-		"max_fps=30",
+		fmt.Sprintf("max_fps=%d", globalConfig.Stream.MaxFPS),
 		"raw_stream=true",
 	)
 	serverCmd.Stderr = io.Discard
@@ -913,9 +957,6 @@ func detectServerVersion(serverPath string) string {
 	return "3.2"
 }
 
-func phoneWindowSize() (int, int) {
-	return 420, 920
-}
 
 // ─── main ──────────────────────────────────────────────────────────────────
 
@@ -927,7 +968,11 @@ func main() {
 	log.Printf("Using adb: %s", adbPath)
 	globalAdbPath = adbPath
 
-	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", UDPIp, UDPPort))
+	exePath, _ := os.Executable()
+	exePath, _ = filepath.EvalSymlinks(exePath)
+	loadConfig(filepath.Dir(exePath))
+
+	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", globalConfig.GPS.UDPIP, globalConfig.GPS.UDPPort))
 	if err != nil {
 		log.Fatalf("Failed to resolve UDP address: %v", err)
 	}
@@ -944,7 +989,7 @@ func main() {
 		log.Println("ffmpeg not found — MJPEG /stream fallback unavailable (WebSocket H.264 will be used)")
 	}
 
-	exePath, _ := os.Executable()
+	exePath, _ = os.Executable()
 	exePath, _ = filepath.EvalSymlinks(exePath)
 	globalServerJar = filepath.Join("scrcpy", "scrcpy-server")
 	if globalServerJar == "" {
@@ -1244,6 +1289,12 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	// ── GET /config
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(globalConfig)
+	})
+
 	// ── GET /window/phone-size
 	http.HandleFunc("/window/phone-size", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1294,7 +1345,7 @@ func main() {
 
 	time.Sleep(300 * time.Millisecond)
 
-	phoneWinW, phoneWinH = phoneWindowSize()
+	phoneWinW, phoneWinH = globalConfig.Window.PhoneWidth, globalConfig.Window.PhoneHeight
 	mainWebview = webview.New(false)
 	defer mainWebview.Destroy()
 	setWindowIcon(mainWebview.Window())

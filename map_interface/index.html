@@ -730,12 +730,18 @@
         let mapInitialized = false;
         let leafletMap = null;
         let mapMaximized = false;
-        let savedMapWidth = 420;
-        const DEFAULT_MAP_WIDTH = 420;
+        let appConfig = { window: { phone_width: 420, phone_height: 920, map_panel_width: 420, map_open_width: 0, map_open_height: 0 } };
+        let savedMapWidth = appConfig.window.map_panel_width;
+        let DEFAULT_MAP_WIDTH = appConfig.window.map_panel_width;
         const MAX_MAP_WIDTH = () => Math.round(window.innerWidth * 0.70);
 
         let phoneSize = { width: 0, height: 0 };
         fetch('/window/phone-size').then(r => r.json()).then(d => { phoneSize = d; });
+        fetch('/config').then(r => r.json()).then(cfg => {
+            appConfig = cfg;
+            DEFAULT_MAP_WIDTH = cfg.window.map_panel_width || 420;
+            savedMapWidth = DEFAULT_MAP_WIDTH;
+        });
 
         function resizeWindow(width, height) {
             fetch('/window/resize', {
@@ -758,7 +764,9 @@
                 btnMapMaximize.title = 'Maximizar mapa';
                 if (phoneSize.width) resizeWindow(phoneSize.width, phoneSize.height);
             } else {
-                resizeWindow(screen.availWidth, screen.availHeight);
+                const openW = appConfig.window.map_open_width || screen.availWidth;
+                const openH = appConfig.window.map_open_height || screen.availHeight;
+                resizeWindow(openW, openH);
                 mapPanel.style.width = savedMapWidth + 'px';
                 mapPanel.classList.remove('hidden');
                 resizer.classList.remove('hidden');
