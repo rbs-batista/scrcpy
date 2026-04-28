@@ -73,12 +73,18 @@ func getSerial() string {
 	return currentSerial
 }
 
+func newCmd(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	setProcAttr(cmd)
+	return cmd
+}
+
 func makeAdbCmd(args ...string) *exec.Cmd {
 	serial := getSerial()
 	if serial != "" {
 		args = append([]string{"-s", serial}, args...)
 	}
-	return exec.Command(globalAdbPath, args...)
+	return newCmd(globalAdbPath, args...)
 }
 
 // findAdb locates the adb binary, preferring the one bundled next to the executable.
@@ -172,7 +178,7 @@ func findFfmpeg() string {
 }
 
 func getDeviceIP(serial string) string {
-	cmd := exec.Command(globalAdbPath, "-s", serial, "shell", "ip", "route", "show", "dev", "wlan0")
+	cmd := newCmd(globalAdbPath, "-s", serial, "shell", "ip", "route", "show", "dev", "wlan0")
 	out, err := cmd.Output()
 	if err == nil {
 		for part := range strings.FieldsSeq(string(out)) {
@@ -181,7 +187,7 @@ func getDeviceIP(serial string) string {
 			}
 		}
 	}
-	cmd2 := exec.Command(globalAdbPath, "-s", serial, "shell", "ip", "addr", "show", "wlan0")
+	cmd2 := newCmd(globalAdbPath, "-s", serial, "shell", "ip", "addr", "show", "wlan0")
 	out2, err := cmd2.Output()
 	if err == nil {
 		for line := range strings.SplitSeq(string(out2), "\n") {
@@ -206,13 +212,13 @@ func ensureServerJar(serial string) {
 	}
 
 	// Mata qualquer scrcpy antigo + remove jar
-	exec.Command(globalAdbPath, "-s", serial, "shell",
+	newCmd(globalAdbPath, "-s", serial, "shell",
 		"sh", "-c",
 		"pkill -9 -f scrcpy; rm -f /data/local/tmp/scrcpy-server",
 	).Run()
 
 	// Push do jar correto
-	push := exec.Command(globalAdbPath, "-s", serial, "push",
+	push := newCmd(globalAdbPath, "-s", serial, "push",
 		globalServerJar,
 		"/data/local/tmp/scrcpy-server",
 	)
@@ -226,7 +232,7 @@ func ensureServerJar(serial string) {
 }
 
 func listDevices() []DeviceInfo {
-	cmd := exec.Command(globalAdbPath, "devices", "-l")
+	cmd := newCmd(globalAdbPath, "devices", "-l")
 	out, err := cmd.Output()
 	if err != nil {
 		log.Printf("adb devices error: %v", err)
@@ -360,7 +366,7 @@ func (s *ScrcpyDirectStream) Start() error {
 	ensureServerJar(serial)
 
 	// kill anterior
-	exec.Command(globalAdbPath, "-s", serial, "shell",
+	newCmd(globalAdbPath, "-s", serial, "shell",
 		"sh", "-c",
 		"pkill -9 -f scrcpy || true",
 	).Run()
@@ -368,14 +374,14 @@ func (s *ScrcpyDirectStream) Start() error {
 	time.Sleep(500 * time.Millisecond)
 
 	// forward
-	if out, err := exec.Command(globalAdbPath, "-s", serial, "forward",
+	if out, err := newCmd(globalAdbPath, "-s", serial, "forward",
 		fmt.Sprintf("tcp:%d", s.tcpPort), "localabstract:scrcpy",
 	).CombinedOutput(); err != nil {
 		return fmt.Errorf("adb forward failed: %v — %s", err, out)
 	}
 
 	// start server
-	serverCmd := exec.Command(globalAdbPath, "-s", serial, "shell",
+	serverCmd := newCmd(globalAdbPath, "-s", serial, "shell",
 		"CLASSPATH=/data/local/tmp/scrcpy-server",
 		"app_process", "/",
 		"com.genymobile.scrcpy.Server", globalServerVer,
@@ -387,8 +393,8 @@ func (s *ScrcpyDirectStream) Start() error {
 		"max_fps=30",
 		"raw_stream=true",
 	)
-	serverCmd.Stderr = os.Stderr
-	serverCmd.Stdout = os.Stdout
+	serverCmd.Stderr = io.Discard
+	serverCmd.Stdout = io.Discard
 
 	if err := serverCmd.Start(); err != nil {
 		return err
@@ -428,7 +434,7 @@ func (s *ScrcpyDirectStream) Start() error {
 	// raw_stream=true sends no handshake — get device resolution via ADB instead
 	var w, h uint16 = 1080, 2340
 	{
-		cmd := exec.Command(globalAdbPath, "-s", serial, "shell", "wm", "size")
+		cmd := newCmd(globalAdbPath, "-s", serial, "shell", "wm", "size")
 		if out, err := cmd.Output(); err == nil {
 			for _, line := range strings.Split(string(out), "\n") {
 				if !strings.Contains(line, "size:") {
@@ -478,7 +484,7 @@ func (s *ScrcpyDirectStream) Start() error {
 
 // fetchDeviceSize queries the device resolution via ADB and caches it.
 func (s *ScrcpyDirectStream) fetchDeviceSize() {
-	cmd := exec.Command(globalAdbPath, "-s", s.serial, "shell", "wm", "size")
+	cmd := newCmd(globalAdbPath, "-s", s.serial, "shell", "wm", "size")
 	out, err := cmd.Output()
 	if err != nil {
 		return
@@ -644,7 +650,7 @@ func (s *ScrcpyDirectStream) Stop() {
 	serial := s.serial
 	s.mu.Unlock()
 
-	exec.Command(globalAdbPath, "-s", serial, "shell",
+	newCmd(globalAdbPath, "-s", serial, "shell",
 		"sh", "-c",
 		"pkill -9 -f scrcpy.Server 2>/dev/null; "+
 			"ps -A 2>/dev/null | grep scrcpy | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null; true",
@@ -670,7 +676,7 @@ func (s *ScrcpyDirectStream) Stop() {
 	s.controlConn = nil
 	s.mu.Unlock()
 
-	exec.Command(globalAdbPath, "-s", serial, "forward", "--remove",
+	newCmd(globalAdbPath, "-s", serial, "forward", "--remove",
 		fmt.Sprintf("tcp:%d", s.tcpPort)).Run()
 }
 
@@ -829,6 +835,24 @@ func (p *StreamPool) watch() {
 		p.sync()
 		time.Sleep(3 * time.Second)
 	}
+}
+
+func (p *StreamPool) stopAll() {
+	p.mu.Lock()
+	streams := make([]*ScrcpyDirectStream, 0, len(p.streams))
+	for _, ds := range p.streams {
+		streams = append(streams, ds)
+	}
+	p.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, ds := range streams {
+		wg.Add(1)
+		go func(ds *ScrcpyDirectStream) {
+			defer wg.Done()
+			ds.Stop()
+		}(ds)
+	}
+	wg.Wait()
 }
 
 // ─── misc helpers ──────────────────────────────────────────────────────────
@@ -1273,8 +1297,12 @@ func main() {
 	phoneWinW, phoneWinH = phoneWindowSize()
 	mainWebview = webview.New(false)
 	defer mainWebview.Destroy()
+	setWindowIcon(mainWebview.Window())
 	mainWebview.SetTitle("DM Tools")
 	mainWebview.SetSize(phoneWinW, phoneWinH, webview.HintNone)
 	mainWebview.Navigate("http://localhost" + HTTPPort)
 	mainWebview.Run()
+
+	// window closed — stop all active streams and subprocesses
+	pool.stopAll()
 }
