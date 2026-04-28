@@ -385,8 +385,7 @@ func (s *ScrcpyDirectStream) Start() error {
 		"audio=false",
 		"control=true",
 		"max_fps=30",
-		// 👇 REMOVA raw_stream
-		// "raw_stream=true",
+		"raw_stream=true",
 	)
 	serverCmd.Stderr = os.Stderr
 	serverCmd.Stdout = os.Stdout
@@ -426,39 +425,31 @@ func (s *ScrcpyDirectStream) Start() error {
 		return fmt.Errorf("failed to connect sockets")
 	}
 
-	// 🔥 =========================
-	// 🔥 HANDSHAKE CORRETO AQUI
-	// 🔥 =========================
-
-	videoConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-	// 1. dummy byte
-	dummy := make([]byte, 1)
-	if _, err := io.ReadFull(videoConn, dummy); err != nil {
-		return fmt.Errorf("handshake dummy failed: %v", err)
+	// raw_stream=true sends no handshake — get device resolution via ADB instead
+	var w, h uint16 = 1080, 2340
+	{
+		cmd := exec.Command(globalAdbPath, "-s", serial, "shell", "wm", "size")
+		if out, err := cmd.Output(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if !strings.Contains(line, "size:") {
+					continue
+				}
+				parts := strings.Split(line, ":")
+				if len(parts) < 2 {
+					continue
+				}
+				wh := strings.Split(strings.TrimSpace(parts[1]), "x")
+				if len(wh) == 2 {
+					wv, _ := strconv.ParseUint(strings.TrimSpace(wh[0]), 10, 16)
+					hv, _ := strconv.ParseUint(strings.TrimSpace(wh[1]), 10, 16)
+					if wv > 0 && hv > 0 {
+						w, h = uint16(wv), uint16(hv)
+					}
+				}
+			}
+		}
+		log.Printf("[%s] device resolution: %dx%d (via ADB)", serial, w, h)
 	}
-
-	// 2. device name (64 bytes)
-	nameBuf := make([]byte, 64)
-	if _, err := io.ReadFull(videoConn, nameBuf); err != nil {
-		return fmt.Errorf("handshake device name failed: %v", err)
-	}
-
-	deviceName := strings.TrimRight(string(nameBuf), "\x00")
-	log.Printf("[%s] device name: %s", serial, deviceName)
-
-	// 3. resolution (4 bytes)
-	sizeBuf := make([]byte, 4)
-	if _, err := io.ReadFull(videoConn, sizeBuf); err != nil {
-		return fmt.Errorf("handshake size failed: %v", err)
-	}
-
-	w := binary.BigEndian.Uint16(sizeBuf[0:2])
-	h := binary.BigEndian.Uint16(sizeBuf[2:4])
-
-	log.Printf("[%s] device resolution: %dx%d", serial, w, h)
-
-	videoConn.SetReadDeadline(time.Time{})
 
 	// salvar estado
 	stopChan := make(chan struct{})
