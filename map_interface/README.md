@@ -88,3 +88,15 @@ Ao fechar a janela, todos os processos scrcpy são encerrados automaticamente.
 | GET | `/device/size` | Resolução do dispositivo |
 | GET | `/window/phone-size` | Tamanho da janela nativa |
 | POST | `/window/resize` | Redimensiona a janela nativa |
+
+Clean
+
+adb shell pkill -9 -f scrcpy
+adb shell rm -f /data/local/tmp/scrcpy-server*
+adb push scrcpy/scrcpy-server /data/local/tmp/scrcpy-server
+adb forward --remove-all
+adb shell pkill -f scrcpy
+
+adb forward --list
+adb forward tcp:27183 localabstract:scrcpy
+adb shell CLASSPATH=/data/local/tmp/scrcpy-server app_process / com.genymobile.scrcpy.Server 3.2 raw_stream=true
